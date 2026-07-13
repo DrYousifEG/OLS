@@ -15,7 +15,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="styles.css?v=1.1">
+<link rel="stylesheet" href="styles.css?v=1.2">
 </head>
 <body>
 <div id="app-shell" hidden>
@@ -36,6 +36,7 @@
       <a href="#/tests" data-view="tests" class="nav-item"><span class="ico">📝</span> الاختبارات</a>
       <a href="#/results" data-view="results" class="nav-item"><span class="ico">📊</span> النتائج</a>
       <a href="#/assistant" data-view="assistant" class="nav-item"><span class="ico">🤖</span> المساعد</a>
+      <a href="#/messages" data-view="messages" class="nav-item"><span class="ico">💬</span> المحادثات</a>
       <a href="#/kindergarten" data-view="kindergarten" class="nav-item kg-item"><span class="ico">🧸</span> الروضة</a>
       <a href="#/users" data-view="users" class="nav-item" id="nav-users"><span class="ico">👥</span> المستخدمون</a>
     </nav>
@@ -49,6 +50,7 @@
   <main id="main">
     <header id="topbar">
       <button id="menu-btn" aria-label="القائمة"><svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg></button>
+      <div id="user-menu"></div>
       <div id="crumbs"></div>
       <div class="topbar-right">
         <div class="global-search">
@@ -56,6 +58,7 @@
           <input id="global-search" type="text" placeholder="ابحث في المناهج والدروس…" autocomplete="off">
           <div id="search-results"></div>
         </div>
+        <button id="num-toggle" title="تبديل نظام الأرقام (عربية/هندية)">١٢٣</button>
         <div id="today-chip"></div>
       </div>
     </header>
@@ -65,7 +68,7 @@
 <div id="auth-screen"></div>
 <div id="modal-root"></div>
 <div id="toast-root"></div>
-<script src="data.js?v=1.1"></script>
-<script src="app.js?v=1.1"></script>
+<script src="data.js?v=1.2"></script>
+<script src="app.js?v=1.2"></script>
 </body>
 </html>

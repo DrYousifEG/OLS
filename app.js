@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.1 · 2026-07-13';
+const APP_VERSION = 'v1.2 · 2026-07-14';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -15,6 +15,33 @@ const esc = s => String(s == null ? '' : s).replace(/[&<>"']/g, c => ({'&': '&am
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 7);
 const arDate = t => { try { return new Date(t).toLocaleDateString('ar', {year: 'numeric', month: 'long', day: 'numeric'}); } catch (e) { return ''; } };
 const clamp = (n, a, b) => Math.max(a, Math.min(b, n));
+
+/* Numeral system: 'hindi' (٠١٢٣ Eastern-Arabic) or 'arabic' (0123 Western).
+   num() converts digits in any value to the active mode; numDir() gives the
+   writing direction the user asked for (Western = LTR, Eastern = RTL). */
+const EAST_DIGITS = '٠١٢٣٤٥٦٧٨٩';
+let NUM_MODE = 'hindi';
+function num(v) {
+  v = String(v == null ? '' : v);
+  return NUM_MODE === 'arabic'
+    ? v.replace(/[٠-٩]/g, d => String(EAST_DIGITS.indexOf(d)))
+    : v.replace(/[0-9]/g, d => EAST_DIGITS[+d]);
+}
+function numDir() { return NUM_MODE === 'arabic' ? 'ltr' : 'rtl'; }
+/* wrap a numeric/expression string with the correct direction + digits */
+function numSpan(v) { return `<bdi dir="${numDir()}" style="unicode-bidi:isolate">${num(esc(v))}</bdi>`; }
+function updateNumToggle() { const b = $('#num-toggle'); if (b) b.textContent = NUM_MODE === 'hindi' ? '١٢٣' : '123'; }
+function toggleNum() { NUM_MODE = NUM_MODE === 'hindi' ? 'arabic' : 'hindi'; Store.lset('num-mode', NUM_MODE); updateNumToggle(); router(true); }
+
+/* Never auto-re-render (from the 12s sync poll) while the user is interacting —
+   an open modal or a focused field. Prevents lost input / disrupted uploads.
+   (hard-won-fix #15) */
+function canAutoRerender() {
+  if ($('#modal-root .modal-back')) return false;
+  const a = document.activeElement;
+  if (a && (a.tagName === 'INPUT' || a.tagName === 'TEXTAREA' || a.tagName === 'SELECT' || a.isContentEditable)) return false;
+  return true;
+}
 
 function toast(msg, kind) {
   const root = $('#toast-root');
@@ -60,7 +87,7 @@ const Store = {
         let changed = false;
         for (const k in r.kv) { if (k.indexOf(PREFIX) === 0) { this._writeLocal(k.slice(PREFIX.length), r.kv[k]); changed = true; } }
         this.lastPull = r.now || Date.now();
-        if (changed && !silent && typeof router === 'function') router(true);
+        if (changed && !silent && typeof router === 'function' && canAutoRerender()) router(true);
       }
     } catch (e) {}
   },
@@ -79,6 +106,14 @@ async function api(path, method, body) {
 }
 
 /* ------------------------------ media/blobs ----------------------------- */
+const MAX_UPLOAD_MB = 50;   // must stay under the server's ~53MB real-file cap
+/* returns true if OK to upload; otherwise toasts a clear reason and returns false */
+function checkUploadSize(file, isMedia) {
+  const mb = file.size / 1048576;
+  if (mb <= MAX_UPLOAD_MB) return true;
+  toast(`الملف كبير جدًا (${Math.round(mb)}MB). الحد الأقصى ${MAX_UPLOAD_MB}MB.` + (isMedia ? ' استخدم رابط YouTube/Drive للفيديوهات الكبيرة.' : ' يُفضّل ضغط الملف.'), 'err');
+  return false;
+}
 function fileToDataURL(file) {
   return new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
 }
@@ -112,6 +147,35 @@ function lessons() { const custom = Store.get('lessons', []); return DATA.lesson
 function tests() { const custom = Store.get('tests', []); return DATA.tests.concat(custom); }
 function results() { return Store.get('results', []); }
 function addResult(rec) { const r = results(); r.push(rec); Store.set('results', r); }
+
+/* ---- user directory + messaging relationships ---- */
+let DIRECTORY = [];
+async function loadDirectory() { try { const r = await api('/api/directory'); DIRECTORY = r.users || []; } catch (e) { DIRECTORY = []; } return DIRECTORY; }
+const levelsOf = u => (u && u.levels) || [];
+const shares = (a, b) => levelsOf(a).some(x => levelsOf(b).includes(x));
+function meDir() { return DIRECTORY.find(u => u.u === Auth.user.u) || Auth.user; }
+/* who the current user is allowed to message, per role + level assignment */
+function myContacts() {
+  const meU = Auth.user.u; const me = meDir();
+  const dir = DIRECTORY.filter(u => u.u !== meU);
+  if (Auth.isAdmin) return dir;
+  if (Auth.isTeacher) return dir.filter(u => u.role === 'مدير'
+    || (u.role === 'طالب' && (levelsOf(me).length === 0 || shares(me, u)))
+    || (u.role === 'ولي أمر'));
+  if (Auth.isStudent) return dir.filter(u => u.role === 'مدير'
+    || (u.role === 'معلم' && (levelsOf(u).length === 0 || levelsOf(me).length === 0 || shares(me, u))));
+  if (Auth.isParent) { const child = DIRECTORY.find(u => u.u === (me.child || '')); return dir.filter(u => u.role === 'مدير' || (u.role === 'معلم' && (!child || shares(child, u)))); }
+  return dir.filter(u => u.role === 'مدير');
+}
+const threadKey = (a, b) => [a, b].sort().join('__');
+function messages() { return Store.get('messages', []); }
+function threadWith(otherU) { const k = threadKey(Auth.user.u, otherU); return messages().filter(m => threadKey(m.from, m.to) === k).sort((a, b) => a.t - b.t); }
+function sendMessage(toU, toName, text) {
+  const all = messages();
+  all.push({id: uid(), from: Auth.user.u, fromName: Auth.user.name, to: toU, toName, text, t: Date.now()});
+  Store.set('messages', all);
+}
+function roleEmoji(role) { return {'مدير': '👑', 'معلم': '📗', 'طالب': '🎒', 'ولي أمر': '👪', 'زائر': '👁️'}[role] || '👤'; }
 
 /* ============================== ROUTER ================================== */
 const PAGES = {};
@@ -154,7 +218,7 @@ PAGES.dashboard = function () {
   const recent = res.slice(-5).reverse();
   $('#view').innerHTML = `
     <div class="page-head"><div><h2>مرحبًا، ${esc(Auth.user.name)} 👋</h2><p>${esc(Auth.role)} · هذا ملخّص نشاطك في OLS</p></div></div>
-    <div class="stat-tiles">${tiles.map(t => `<div class="stat ${t.cls}"><div class="k">${t.k}</div><div class="v">${t.v}</div><div class="s">${t.s}</div></div>`).join('')}</div>
+    <div class="stat-tiles">${tiles.map(t => `<div class="stat ${t.cls}"><div class="k">${t.k}</div><div class="v">${num(t.v)}</div><div class="s">${num(t.s)}</div></div>`).join('')}</div>
     <div class="section-title">🚀 وصول سريع</div>
     <div class="grid g-4">${quick.map(q => `<a class="card" href="#/${q.r}" style="cursor:pointer"><div style="font-size:2rem">${q.e}</div><h3 style="margin:.3em 0 .1em;color:var(--teal-ink)">${q.t}</h3><p class="muted" style="margin:0;font-size:.85rem">${q.d}</p></a>`).join('')}</div>
     <div class="grid g-2" style="margin-top:20px">
@@ -162,7 +226,7 @@ PAGES.dashboard = function () {
         <div class="row">${DATA.levels.map(l => `<a class="pill ${l.kindergarten ? 'gold' : 'teal'}" href="#/${l.kindergarten ? 'kindergarten' : 'curriculum/' + l.id}" style="cursor:pointer">${esc(l.name)}</a>`).join('')}</div></div>
       <div class="card"><div class="section-title" style="margin-top:0">🕘 أحدث النتائج</div>
         ${recent.length ? `<table class="tbl"><tr><th>الطالب</th><th>الاختبار</th><th>النتيجة</th><th>التاريخ</th></tr>
-          ${recent.map(r => `<tr><td>${esc(r.userName || r.user)}</td><td>${esc(r.title)}</td><td><b>${r.score}/${r.total}</b></td><td class="muted">${arDate(r.date)}</td></tr>`).join('')}</table>`
+          ${recent.map(r => `<tr><td>${esc(r.userName || r.user)}</td><td>${esc(r.title)}</td><td><b>${num(r.score)}/${num(r.total)}</b></td><td class="muted">${num(arDate(r.date))}</td></tr>`).join('')}</table>`
           : `<div class="empty"><div class="big">📊</div>لا توجد نتائج بعد — ابدأ باختبار!</div>`}
       </div>
     </div>`;
@@ -311,8 +375,9 @@ function addBookModal() {
     if (kind === 'link') { item.kind = 'link'; item.url = $('#b-url', m.el).value.trim(); if (!item.url) return toast('أدخل الرابط', 'err'); }
     else {
       const f = $('#b-file', m.el).files[0]; if (!f) return toast('اختر ملفًا', 'err');
+      if (!checkUploadSize(f, false)) return;
       toast('جارٍ الرفع…'); const dataUrl = await fileToDataURL(f); const key = 'lib-' + item.id;
-      try { await uploadBlob(key, dataUrl); } catch (e) { return toast('تعذّر الرفع', 'err'); }
+      try { await uploadBlob(key, dataUrl); } catch (e) { return toast('تعذّر الرفع — تأكّد من الاتصال وحجم الملف.', 'err'); }
       item.kind = 'file'; item.blobKey = key; item.ext = (f.name.split('.').pop() || '').toUpperCase();
     }
     const c = Store.get('library', []); c.push(item); Store.set('library', c); m.close(); toast('تمت الإضافة', 'ok'); PAGES.library();
@@ -393,7 +458,7 @@ function addLessonModal(existing) {
     else {
       const f = $('#l-file', m.el).files[0];
       if (!f && !existing) return toast('اختر ملفًا', 'err');
-      if (f) { toast('جارٍ الرفع…'); const dataUrl = await fileToDataURL(f); const key = 'les-' + item.id; try { await uploadBlob(key, dataUrl); } catch (er) { return toast('تعذّر الرفع', 'err'); } item.blobKey = key; item.embed = ''; }
+      if (f) { if (!checkUploadSize(f, true)) return; toast('جارٍ رفع المحتوى…'); const dataUrl = await fileToDataURL(f); const key = 'les-' + item.id; try { await uploadBlob(key, dataUrl); } catch (er) { return toast('تعذّر الرفع — للفيديوهات الكبيرة استخدم رابط YouTube/Drive.', 'err'); } item.blobKey = key; item.embed = ''; }
     }
     const c = Store.get('lessons', []);
     const idx = c.findIndex(x => x.id === item.id);
@@ -428,9 +493,9 @@ function mathDrill(ex) {
   let cur = gen();
   const render = () => {
     const body = `<div class="drill">
-      <div class="row" style="justify-content:center;gap:16px"><span class="streak">🔥 ${streak}</span><span class="muted">${done}/${total}</span></div>
-      <div class="drill-q">${cur.a} ${cur.op} ${cur.b} = ?</div>
-      <input class="drill-input" id="d-ans" type="number" inputmode="numeric" autofocus>
+      <div class="row" style="justify-content:center;gap:16px"><span class="streak">🔥 ${num(streak)}</span><span class="muted">${num(done)}/${num(total)}</span></div>
+      <div class="drill-q" dir="${numDir()}">${num(cur.a)} ${cur.op} ${num(cur.b)} = ?</div>
+      <input class="drill-input" id="d-ans" type="number" inputmode="numeric" dir="${numDir()}" autofocus>
       <div style="margin-top:16px"><button class="btn primary" id="d-check">تحقّق</button></div>
       <p id="d-fb" style="height:26px;margin-top:10px;font-weight:700"></p></div>`;
     const m = modal(ex.title, body, '', {sticky: false});
@@ -440,7 +505,7 @@ function mathDrill(ex) {
       done++;
       const fb = $('#d-fb', m.el);
       if (v === cur.ans) { correct++; streak++; fb.textContent = '✅ أحسنت!'; fb.style.color = 'var(--green)'; }
-      else { streak = 0; fb.textContent = '❌ الصواب: ' + cur.ans; fb.style.color = 'var(--danger)'; }
+      else { streak = 0; fb.textContent = '❌ الصواب: ' + num(cur.ans); fb.style.color = 'var(--danger)'; }
       setTimeout(() => {
         if (done >= total) { m.close(); drillDone(ex, correct, total); return; }
         cur = gen(); m.close(); render();
@@ -457,7 +522,7 @@ function orderDrill(ex) {
     const it = ex.items[idx];
     const pool = it.scrambled.slice();
     const body = `<div class="drill">
-      <p class="muted">${idx + 1}/${ex.items.length}</p>
+      <p class="muted">${num(idx + 1)}/${num(ex.items.length)}</p>
       <h3>رتّب الحروف لتكوين كلمة صحيحة</h3>
       <div class="scramble" id="d-built" style="min-height:60px;border-bottom:2px dashed var(--line)"></div>
       <div class="scramble" id="d-pool">${pool.map((c, i) => `<button class="tile" data-i="${i}">${esc(c)}</button>`).join('')}</div>
@@ -482,8 +547,8 @@ function drillDone(ex, correct, total) {
   addResult({user: Auth.user.u, userName: Auth.user.name, title: 'تمرين: ' + ex.title, score: correct, total, date: Date.now(), kind: 'exercise'});
   modal('انتهى التمرين', `<div style="text-align:center">
     <div style="font-size:3.4rem">${pct >= 80 ? '🏆' : pct >= 50 ? '👍' : '💪'}</div>
-    <h2 style="color:var(--teal-ink)">${correct} / ${total}</h2>
-    <p class="muted">نسبة النجاح ${pct}%</p></div>`, `<button class="btn primary" onclick="this.closest('.modal-back').remove()">تم</button>`);
+    <h2 style="color:var(--teal-ink)">${num(correct)} / ${num(total)}</h2>
+    <p class="muted">نسبة النجاح ${num(pct)}%</p></div>`, `<button class="btn primary" onclick="this.closest('.modal-back').remove()">تم</button>`);
 }
 
 /* ---- Tests ---- */
@@ -512,7 +577,7 @@ function runTest(id) {
       <div class="page-head"><div><h2>📝 ${esc(t.title)}</h2><p>${esc(t.subject)} · ${gradeName(t.grade)}</p></div>
         <div class="card" style="padding:.5em 1em"><span class="quiz-timer" id="qt"></span></div></div>
       <div class="quiz">
-        ${t.questions.map((q, qi) => `<div class="q-card"><div class="q-num">السؤال ${qi + 1} من ${t.questions.length}</div>
+        ${t.questions.map((q, qi) => `<div class="q-card"><div class="q-num">السؤال ${num(qi + 1)} من ${num(t.questions.length)}</div>
           <div class="q-text">${esc(q.q)}</div>
           ${q.choices.map((c, ci) => `<div class="choice" data-q="${qi}" data-c="${ci}"><div class="mk">${'أبجد'[ci] || (ci + 1)}</div><div>${esc(c)}</div></div>`).join('')}</div>`).join('')}
         <div class="row" style="justify-content:center;margin:10px 0 30px">
@@ -528,7 +593,7 @@ function runTest(id) {
   };
   const tick = () => {
     remaining--; const mm = String(Math.floor(remaining / 60)).padStart(2, '0'), ss = String(remaining % 60).padStart(2, '0');
-    const qt = $('#qt'); if (qt) { qt.textContent = '⏱ ' + mm + ':' + ss; qt.style.color = remaining < 30 ? 'var(--danger)' : ''; }
+    const qt = $('#qt'); if (qt) { qt.textContent = '⏱ ' + num(mm + ':' + ss); qt.style.color = remaining < 30 ? 'var(--danger)' : ''; }
     if (remaining <= 0) { clearInterval(timer); grade(); }
   };
   const grade = () => {
@@ -540,7 +605,7 @@ function runTest(id) {
       <div class="grid g-2">
         <div class="card" style="text-align:center">
           ${ringSvg(pct)}
-          <h2 style="color:var(--teal-ink);margin-top:8px">${score} / ${t.questions.length}</h2>
+          <h2 style="color:var(--teal-ink);margin-top:8px">${num(score)} / ${num(t.questions.length)}</h2>
           <p class="pill ${pct >= 50 ? 'teal' : ''}" style="${pct >= 50 ? '' : 'background:#fdeaea;color:var(--danger)'}">${pct >= 80 ? 'ممتاز 🏆' : pct >= 50 ? 'جيد 👍' : 'يحتاج مراجعة 💪'}</p>
           <div class="row" style="justify-content:center;margin-top:14px"><button class="btn primary" onclick="location.hash='#/tests'">اختبار آخر</button><button class="btn" onclick="location.hash='#/results'">كل النتائج</button></div>
         </div>
@@ -561,7 +626,7 @@ function ringSvg(pct) {
     <circle cx="75" cy="75" r="${r}" fill="none" stroke="#e6efec" stroke-width="14"/>
     <circle cx="75" cy="75" r="${r}" fill="none" stroke="${col}" stroke-width="14" stroke-linecap="round"
       stroke-dasharray="${c}" stroke-dashoffset="${off}" transform="rotate(-90 75 75)"/>
-    <text x="75" y="82" text-anchor="middle" font-size="30" font-weight="800" fill="${col}">${pct}%</text></svg>`;
+    <text x="75" y="82" text-anchor="middle" font-size="30" font-weight="800" fill="${col}">${num(pct)}%</text></svg>`;
 }
 function addTestModal() {
   const state = {questions: [{q: '', choices: ['', '', '', ''], answer: 0}]};
@@ -618,18 +683,18 @@ PAGES.results = function () {
   $('#view').innerHTML = `
     <div class="page-head"><div><h2>📊 النتائج والإحصاءات</h2><p>${Auth.isAdmin || Auth.isTeacher ? 'أداء جميع الطلبة' : 'أداؤك عبر الاختبارات والتمارين'}</p></div></div>
     <div class="stat-tiles">
-      <div class="stat"><div class="k">إجمالي المحاولات</div><div class="v">${mine.length}</div></div>
-      <div class="stat g"><div class="k">المتوسط العام</div><div class="v">${overall}%</div></div>
-      <div class="stat b"><div class="k">أعلى نتيجة</div><div class="v">${Math.max(...mine.map(r => Math.round(r.score / r.total * 100)))}%</div></div>
-      <div class="stat p"><div class="k">المواد</div><div class="v">${subjAvg.length}</div></div>
+      <div class="stat"><div class="k">إجمالي المحاولات</div><div class="v">${num(mine.length)}</div></div>
+      <div class="stat g"><div class="k">المتوسط العام</div><div class="v">${num(overall)}%</div></div>
+      <div class="stat b"><div class="k">أعلى نتيجة</div><div class="v">${num(Math.max(...mine.map(r => Math.round(r.score / r.total * 100))))}%</div></div>
+      <div class="stat p"><div class="k">المواد</div><div class="v">${num(subjAvg.length)}</div></div>
     </div>
     <div class="grid g-2" style="margin-top:18px">
       <div class="card"><div class="section-title" style="margin-top:0">المتوسط حسب المادة</div>
-        <div class="bar-chart">${subjAvg.map(x => `<div class="bar" style="height:${x.v / maxBar * 100}%"><span class="val">${x.v}%</span><span class="lbl">${esc(x.s)}</span></div>`).join('')}</div>
+        <div class="bar-chart">${subjAvg.map(x => `<div class="bar" style="height:${x.v / maxBar * 100}%"><span class="val">${num(x.v)}%</span><span class="lbl">${esc(x.s)}</span></div>`).join('')}</div>
         <div style="height:26px"></div></div>
       <div class="card"><div class="section-title" style="margin-top:0">سجلّ المحاولات</div>
         <div style="max-height:300px;overflow:auto"><table class="tbl"><tr>${Auth.isAdmin || Auth.isTeacher ? '<th>الطالب</th>' : ''}<th>النشاط</th><th>النتيجة</th><th>التاريخ</th></tr>
-          ${mine.slice().reverse().map(r => `<tr>${Auth.isAdmin || Auth.isTeacher ? `<td>${esc(r.userName || r.user)}</td>` : ''}<td>${esc(r.title)}</td><td><b>${r.score}/${r.total}</b> (${Math.round(r.score / r.total * 100)}%)</td><td class="muted">${arDate(r.date)}</td></tr>`).join('')}</table></div></div>
+          ${mine.slice().reverse().map(r => `<tr>${Auth.isAdmin || Auth.isTeacher ? `<td>${esc(r.userName || r.user)}</td>` : ''}<td>${esc(r.title)}</td><td><b>${num(r.score)}/${num(r.total)}</b> (${num(Math.round(r.score / r.total * 100))}%)</td><td class="muted">${num(arDate(r.date))}</td></tr>`).join('')}</table></div></div>
     </div>`;
 };
 
@@ -763,11 +828,66 @@ async function solveMath(q, imgData) {
   } catch (e) { out.innerHTML = `<div class="card">تعذّر الاتصال بالمساعد.</div>`; }
 }
 
+/* ---- Messages / chat ---- */
+PAGES.messages = function (params) {
+  crumb('المحادثات', 'تواصل مباشر');
+  $('#view').innerHTML = `<div class="page-head"><div><h2>💬 المحادثات</h2><p>تواصل بين المعلمين والطلبة والإدارة${Auth.isTeacher ? ' — طلابك في مستوياتك المخصّصة' : ''}.</p></div>
+    <a class="btn" href="#/">◀ الرئيسية</a></div>
+    <div id="msg-wrap"><div class="empty"><div class="big">💬</div>… جارٍ تحميل جهات الاتصال</div></div>`;
+  loadDirectory().then(() => renderMessages(params[0]));
+};
+function unreadFrom(otherU) {
+  const last = Store.lget('msg-read-' + otherU, 0);
+  return threadWith(otherU).filter(m => m.from === otherU && m.t > last).length;
+}
+function markRead(otherU) { Store.lset('msg-read-' + otherU, Date.now()); }
+function renderMessages(activeU) {
+  const contacts = myContacts();
+  const wrap = $('#msg-wrap');
+  if (!contacts.length) {
+    wrap.innerHTML = `<div class="empty"><div class="big">💬</div>لا توجد جهات اتصال متاحة بعد.<br>
+      <small>${Auth.isStudent ? 'سيظهر معلّموك بعد أن يخصّص المدير مستواك الدراسي من صفحة المستخدمين.' : Auth.isTeacher ? 'سيظهر طلابك بعد تخصيص المستويات لك ولهم من صفحة المستخدمين.' : 'لا يوجد مستخدمون نشطون آخرون بعد.'}</small></div>`;
+    return;
+  }
+  activeU = activeU || Store.lget('msg-active', '');
+  if (!contacts.find(c => c.u === activeU)) activeU = contacts[0].u;
+  Store.lset('msg-active', activeU); markRead(activeU);
+  const other = contacts.find(c => c.u === activeU);
+  const thread = threadWith(activeU);
+  wrap.innerHTML = `<div class="msg-layout">
+    <div class="contact-list">
+      ${contacts.map(c => { const un = unreadFrom(c.u); return `<div class="contact-item ${c.u === activeU ? 'active' : ''}" data-c="${esc(c.u)}">
+        <span class="um-avatar" style="width:38px;height:38px">${esc(initials(c.name))}</span>
+        <div class="ci-info"><div class="ci-name">${esc(c.name)}</div><div class="ci-role">${roleEmoji(c.role)} ${esc(c.role)}${(c.levels && c.levels.length) ? ' · ' + c.levels.map(g => g === 0 ? 'روضة' : num(g)).join('،') : ''}</div></div>
+        ${un ? `<span class="unread">${num(un)}</span>` : ''}</div>`; }).join('')}
+    </div>
+    <div class="card chat" style="height:64vh">
+      <div class="section-title" style="margin-top:0;display:flex;align-items:center;gap:8px">
+        <span class="um-avatar" style="width:34px;height:34px">${esc(initials(other.name))}</span>
+        <div><div style="font-weight:800">${esc(other.name)}</div><div class="muted" style="font-size:.75rem;font-weight:500">${roleEmoji(other.role)} ${esc(other.role)}</div></div>
+      </div>
+      <div class="chat-log" id="msg-log">
+        ${thread.length ? thread.map(m => `<div class="msg ${m.from === Auth.user.u ? 'me' : 'ai'}">${esc(m.text)}<span class="src muted" style="opacity:.7">${arDate(m.t)} · ${num(new Date(m.t).toLocaleTimeString('ar', {hour: '2-digit', minute: '2-digit'}))}</span></div>`).join('') : `<div class="empty" style="margin:auto"><div class="big">✉️</div>ابدأ المحادثة مع ${esc(other.name)}</div>`}
+      </div>
+      <div class="chat-input"><textarea id="msg-in" placeholder="اكتب رسالتك…"></textarea><button class="btn primary" id="msg-send">إرسال</button></div>
+    </div>
+  </div>`;
+  const log = $('#msg-log'); if (log) log.scrollTop = log.scrollHeight;
+  $$('.contact-item').forEach(ci => ci.onclick = () => renderMessages(ci.dataset.c));
+  const send = () => {
+    const inp = $('#msg-in'); const t = inp.value.trim(); if (!t) return;
+    sendMessage(activeU, other.name, t); inp.value = ''; renderMessages(activeU);
+  };
+  $('#msg-send').onclick = send;
+  $('#msg-in').onkeydown = e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send(); } };
+};
+
 /* ---- Kindergarten ---- */
 PAGES.kindergarten = function () {
   crumb('الروضة', 'أنشطة تفاعلية');
   $('#view').innerHTML = `<div class="kg">
-    <div class="page-head"><div><h2>🧸 ركن الروضة</h2><p>ألعاب وأنشطة تفاعلية ممتعة للأطفال دون الصف الأول.</p></div></div>
+    <div class="page-head"><div><h2>🧸 ركن الروضة</h2><p>ألعاب وأنشطة تفاعلية ممتعة للأطفال دون الصف الأول.</p></div>
+      <a class="btn" href="#/">◀ الرئيسية</a></div>
     <div class="kg-grid">
       <button class="kg-tile" style="background:linear-gradient(135deg,#ff6f91,#ff9671)" data-kg="count"><span class="emo">🔢</span>عدّ الأشياء</button>
       <button class="kg-tile" style="background:linear-gradient(135deg,#5ad2c9,#38b2ac)" data-kg="letters"><span class="emo">🔤</span>الحروف</button>
@@ -800,10 +920,10 @@ function kgGame(kind) {
   const play = () => {
     const g = games[kind]();
     const body = `<div class="kg-play">
-      <div class="row" style="justify-content:center;gap:14px"><span class="kg-star">⭐ ${score}</span><span class="muted">${round + 1}/${rounds}</span></div>
+      <div class="row" style="justify-content:center;gap:14px"><span class="kg-star">⭐ ${num(score)}</span><span class="muted">${num(round + 1)}/${num(rounds)}</span></div>
       <h2 style="color:#d6336c;margin-top:10px">${g.prompt}</h2>
       <div class="kg-big">${g.display}</div>
-      <div class="kg-choices">${g.choices.map((c, i) => `<button class="kg-choice" style="background:${palette[i % palette.length]}" data-c="${esc(c)}">${esc(c)}</button>`).join('')}</div>
+      <div class="kg-choices">${g.choices.map((c, i) => `<button class="kg-choice" style="background:${palette[i % palette.length]}" data-c="${esc(c)}">${num(esc(c))}</button>`).join('')}</div>
       <p id="kg-fb" style="height:30px;font-weight:800;font-size:1.3rem;margin-top:12px"></p></div>`;
     const m = modal('🧸 لعبة', body, '');
     $$('.kg-choice', m.el).forEach(btn => btn.onclick = () => {
@@ -819,7 +939,7 @@ function kgGame(kind) {
 function kgDone(score, total) {
   const stars = '⭐'.repeat(Math.max(1, Math.round(score / total * 3)));
   modal('🏆 أحسنت!', `<div style="text-align:center"><div style="font-size:3.6rem">${stars}</div>
-    <h2 style="color:#d6336c">${score} / ${total}</h2><p class="muted">لقد قمت بعمل رائع! 🎈</p></div>`,
+    <h2 style="color:#d6336c">${num(score)} / ${num(total)}</h2><p class="muted">لقد قمت بعمل رائع! 🎈</p></div>`,
     `<button class="btn gold" onclick="this.closest('.modal-back').remove()">العب مرة أخرى</button>`);
 }
 function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[a[i], a[j]] = [a[j], a[i]]; } return a; }
@@ -831,7 +951,8 @@ PAGES.users = function () {
   if (!Auth.isAdmin) { $('#view').innerHTML = `<div class="empty"><div class="big">🔒</div>هذه الصفحة متاحة للمدير فقط.</div>`; return; }
   $('#view').innerHTML = `<div class="page-head"><div><h2>👥 المستخدمون</h2><p>إدارة الحسابات والأدوار والموافقات.</p></div>
     <div class="row"><button class="btn" id="u-invite">🔗 رابط دعوة</button><button class="btn" id="u-refresh">↻ تحديث</button></div></div>
-    <div id="u-list"><div class="empty">… جارٍ التحميل</div></div>`;
+    <div id="u-list"><div class="empty">… جارٍ التحميل</div></div>
+    ${roleMatrixCard()}`;
   const load = async () => {
     try { const r = await api('/api/users'); renderUsers(r.users); } catch (e) { $('#u-list').innerHTML = `<div class="empty">تعذّر التحميل: ${esc(e.message)}</div>`; }
   };
@@ -839,32 +960,86 @@ PAGES.users = function () {
   $('#u-invite').onclick = inviteModal;
   load();
 };
+let USERS_CACHE = [];
+function assignText(u) {
+  if (u.role === 'معلم' || u.role === 'طالب') { const lv = u.levels || []; return lv.length ? lv.map(g => `<span class="pill teal">${g === 0 ? 'روضة' : gradeName(g)}</span>`).join(' ') : '<span class="muted">غير مخصّص</span>'; }
+  if (u.role === 'ولي أمر') return u.child ? `<span class="pill">👦 @${esc(u.child)}</span>` : '<span class="muted">لم يُربط بطالب</span>';
+  if (u.role === 'مدير') return '<span class="pill gold">كل المستويات</span>';
+  return '<span class="muted">—</span>';
+}
 function renderUsers(users) {
+  USERS_CACHE = users;
   const roles = ['مدير', 'معلم', 'طالب', 'ولي أمر', 'زائر'];
   const pending = users.filter(u => u.status === 'pending');
   const rows = users.map(u => `<tr>
     <td><b>${esc(u.name)}</b><br><span class="muted" style="font-size:.78rem">@${esc(u.u)}</span></td>
-    <td>${u.role === 'مدير' ? '<span class="pill gold">مدير</span>' : `<select data-role="${esc(u.u)}" ${u.role === 'مدير' ? 'disabled' : ''}>${roles.filter(r => r !== 'مدير').map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>`}</td>
+    <td>${u.role === 'مدير' ? '<span class="pill gold">👑 مدير</span>' : `<select data-role="${esc(u.u)}">${roles.filter(r => r !== 'مدير').map(r => `<option ${u.role === r ? 'selected' : ''}>${r}</option>`).join('')}</select>`}</td>
+    <td>${assignText(u)}</td>
     <td><span class="badge-status st-${u.status}">${u.status === 'active' ? 'نشط' : u.status === 'pending' ? 'بانتظار' : 'مرفوض'}</span></td>
-    <td class="muted" style="font-size:.78rem">${arDate(u.created)}</td>
+    <td class="muted" style="font-size:.78rem">${num(arDate(u.created))}</td>
     <td><div class="row" style="gap:5px">
       ${u.status === 'pending' ? `<button class="btn sm primary" data-approve="${esc(u.u)}">قبول</button><button class="btn sm danger" data-reject="${esc(u.u)}">رفض</button>` : ''}
-      ${u.role !== 'مدير' ? `<button class="btn sm" data-pw="${esc(u.u)}">🔑</button><button class="btn sm danger" data-del="${esc(u.u)}">🗑</button>` : ''}
+      ${(u.role === 'معلم' || u.role === 'طالب' || u.role === 'ولي أمر') ? `<button class="btn sm" data-assign="${esc(u.u)}" title="التخصيص">📌</button>` : ''}
+      ${u.role !== 'مدير' ? `<button class="btn sm" data-pw="${esc(u.u)}" title="كلمة المرور">🔑</button><button class="btn sm danger" data-del="${esc(u.u)}" title="حذف">🗑</button>` : ''}
     </div></td></tr>`).join('');
   $('#u-list').innerHTML = `
-    ${pending.length ? `<div class="card" style="border-color:var(--gold);margin-bottom:14px"><b>⏳ ${pending.length} طلب بانتظار الموافقة</b></div>` : ''}
+    ${pending.length ? `<div class="card" style="border-color:var(--gold);margin-bottom:14px"><b>⏳ ${num(pending.length)} طلب بانتظار الموافقة</b></div>` : ''}
     <div class="card" style="padding:0;overflow:auto"><table class="tbl">
-      <tr><th>المستخدم</th><th>الدور</th><th>الحالة</th><th>الإنشاء</th><th>إجراءات</th></tr>${rows}</table></div>`;
-  const act = async (u, action, patch) => { try { const r = await api('/api/users', 'POST', {u, action, patch}); renderUsers(r.users); toast('تم', 'ok'); } catch (e) { toast(e.message, 'err'); } };
+      <tr><th>المستخدم</th><th>الدور</th><th>التخصيص / النطاق</th><th>الحالة</th><th>الإنشاء</th><th>إجراءات</th></tr>${rows}</table></div>`;
+  const act = async (u, action, patch) => { try { const r = await api('/api/users', 'POST', {u, action, patch}); renderUsers(r.users); loadDirectory(); toast('تم', 'ok'); } catch (e) { toast(e.message, 'err'); } };
   $$('[data-approve]').forEach(b => b.onclick = () => act(b.dataset.approve, 'approve'));
   $$('[data-reject]').forEach(b => b.onclick = () => act(b.dataset.reject, 'reject'));
   $$('[data-del]').forEach(b => b.onclick = () => armed(b, () => act(b.dataset.del, 'remove')));
   $$('[data-role]').forEach(s => s.onchange = () => act(s.dataset.role, 'update', {role: s.value}));
+  $$('[data-assign]').forEach(b => b.onclick = () => assignModal(users.find(u => u.u === b.dataset.assign), act));
   $$('[data-pw]').forEach(b => b.onclick = () => {
     const body = `<div class="field"><label>كلمة مرور جديدة للمستخدم @${esc(b.dataset.pw)}</label><input id="np" type="text" placeholder="4 أحرف على الأقل"></div>`;
     const m = modal('إعادة تعيين كلمة المرور', body, `<button class="btn primary" id="np-go">تعيين</button>`);
     $('#np-go', m.el).onclick = async () => { const np = $('#np', m.el).value; if (np.length < 4) return toast('4 أحرف على الأقل', 'err'); try { await api('/api/users', 'POST', {u: b.dataset.pw, action: 'setpw', patch: {password: np}}); m.close(); toast('تم تعيين كلمة المرور', 'ok'); } catch (e) { toast(e.message, 'err'); } };
   });
+}
+function assignModal(u, act) {
+  if (!u) return;
+  if (u.role === 'ولي أمر') {
+    const students = USERS_CACHE.filter(x => x.role === 'طالب');
+    const body = `<p class="muted">اربط ولي الأمر <b>${esc(u.name)}</b> بالطالب المسؤول عنه.</p>
+      <div class="field"><label>الطالب</label><select id="as-child"><option value="">— بدون —</option>${students.map(s => `<option value="${esc(s.u)}" ${u.child === s.u ? 'selected' : ''}>${esc(s.name)} (@${esc(s.u)})</option>`).join('')}</select></div>`;
+    const m = modal('تخصيص ولي الأمر', body, `<button class="btn primary" id="as-save">حفظ</button>`);
+    $('#as-save', m.el).onclick = () => { act(u.u, 'update', {child: $('#as-child', m.el).value}); m.close(); };
+    return;
+  }
+  // teacher / student → assign levels
+  const cur = u.levels || [];
+  const body = `<p class="muted">حدّد ${u.role === 'معلم' ? 'المستويات التي يُدرّسها المعلّم' : 'مستوى الطالب الدراسي'} <b>${esc(u.name)}</b>.
+    ${u.role === 'معلم' ? 'سيتواصل المعلّم مع طلبة هذه المستويات فقط.' : 'سيتواصل الطالب مع معلّمي مستواه.'}</p>
+    <div class="row" style="gap:8px">${DATA.levels.map(l => `<label class="pill" style="cursor:pointer;display:inline-flex;gap:6px;align-items:center">
+      <input type="checkbox" value="${l.grade}" ${cur.includes(l.grade) ? 'checked' : ''} style="width:auto"> ${esc(l.name)}</label>`).join('')}</div>`;
+  const m = modal('تخصيص المستويات', body, `<button class="btn primary" id="as-save">حفظ</button>`);
+  $('#as-save', m.el).onclick = () => {
+    const levels = $$('input[type=checkbox]', m.el).filter(c => c.checked).map(c => +c.value);
+    act(u.u, 'update', {levels}); m.close();
+  };
+}
+function roleMatrixCard() {
+  const caps = [
+    ['تصفّح المناهج والمكتبة', 1, 1, 1, 1, 1],
+    ['حضور الحصص وأداء التمارين', 1, 1, 1, 1, 0],
+    ['أداء الاختبارات التفاعلية', 1, 1, 1, 0, 0],
+    ['عرض النتائج', 'الكل', 'طلابه', 'نتائجه', 'ابنه', 0],
+    ['رفع / إضافة محتوى (مكتبة، حصص)', 1, 1, 0, 0, 0],
+    ['إنشاء اختبارات', 1, 1, 0, 0, 0],
+    ['حذف / استبدال المحتوى', 1, 0, 0, 0, 0],
+    ['المحادثات', 'الكل', 'طلابه', 'معلميه', 'معلمي ابنه', 0],
+    ['المساعد الذكي', 1, 1, 1, 1, 0],
+    ['إدارة المستخدمين والموافقات', 1, 0, 0, 0, 0],
+    ['تخصيص الأدوار والمستويات', 1, 0, 0, 0, 0],
+  ];
+  const cell = v => v === 1 ? '<span class="yes">✓</span>' : v === 0 ? '<span class="no">✕</span>' : `<span class="muted" style="font-size:.78rem">${v}</span>`;
+  const heads = ['👑 مدير', '📗 معلم', '🎒 طالب', '👪 ولي أمر', '👁️ زائر'];
+  return `<div class="card" style="margin-top:16px;overflow:auto">
+    <div class="section-title" style="margin-top:0">🧩 مصفوفة صلاحيات الأدوار</div>
+    <table class="matrix"><tr><th>القدرة</th>${heads.map(h => `<th>${h}</th>`).join('')}</tr>
+    ${caps.map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(cell).join('')}</tr>`).join('')}</table></div>`;
 }
 async function inviteModal() {
   const roles = ['معلم', 'طالب', 'ولي أمر', 'زائر'];
@@ -992,11 +1167,32 @@ function showAuth(tab, inviteToken, flags) {
     }
   };
 }
+function initials(name) { const p = String(name || '').trim().split(/\s+/); return (((p[0] || '')[0] || '') + ((p[1] || '')[0] || '')).toUpperCase() || '؟'; }
+function renderUserMenu() {
+  const el = $('#user-menu'); if (!el || !Auth.user) return;
+  el.innerHTML = `<button class="um-btn" id="um-btn" aria-label="حسابي">
+    <span class="um-avatar">${esc(initials(Auth.user.name))}</span>
+    <span class="um-info"><span class="um-name">${esc(Auth.user.name)}</span><span class="um-role">${roleEmoji(Auth.role)} ${esc(Auth.role)}</span></span>
+    <svg class="um-caret" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></button>
+    <div class="um-drop" id="um-drop">
+      <a href="#/account">👤 حسابي</a>
+      <a href="#/messages">💬 المحادثات</a>
+      ${Auth.isAdmin ? '<a href="#/users">👥 المستخدمون</a>' : ''}
+      <hr><button class="danger" id="um-logout">🚪 تسجيل الخروج</button>
+    </div>`;
+  const drop = $('#um-drop', el);
+  $('#um-btn', el).onclick = e => { e.stopPropagation(); drop.classList.toggle('show'); };
+  $('#um-logout', el).onclick = logout;
+  $$('#um-drop a', el).forEach(a => a.onclick = () => drop.classList.remove('show'));
+  if (!renderUserMenu._wired) { document.addEventListener('click', () => { const d = $('#um-drop'); if (d) d.classList.remove('show'); }); renderUserMenu._wired = true; }
+}
 function onLoggedIn(token, user) {
   Store.token = token; Store.set('token', token); Auth.user = user;
   $('#auth-screen').classList.remove('show'); $('#app-shell').hidden = false;
   $('#nav-users').style.display = Auth.isAdmin ? '' : 'none';
   $('#foot-user').textContent = user.name; $('#foot-meta').textContent = Auth.role + ' · ' + APP_VERSION;
+  renderUserMenu();
+  loadDirectory();
   if (!location.hash || location.hash.indexOf('#/join') === 0) location.hash = '#/';
   Store.lastPull = 0; Store.pull(true).then(() => router()); Store.startPolling();
   router();
@@ -1010,6 +1206,9 @@ async function logout() {
 
 /* ------------------------------ boot ------------------------------------ */
 async function boot() {
+  NUM_MODE = Store.lget('num-mode', 'hindi');
+  updateNumToggle();
+  const nt = $('#num-toggle'); if (nt) nt.onclick = toggleNum;
   $('#today-chip').textContent = new Date().toLocaleDateString('ar', {weekday: 'long', day: 'numeric', month: 'long'});
   $('#menu-btn').onclick = toggleSidebar;
   wireGlobalSearch();

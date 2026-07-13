@@ -22,7 +22,7 @@ const ROOT = __dirname;
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 /* must match APP_VERSION in app.js — check what's live at /api/version */
-const APP_VERSION = 'v1.1 · 2026-07-13';
+const APP_VERSION = 'v1.2 · 2026-07-14';
 const STARTED = new Date().toISOString();
 
 function pickDataDir() {
@@ -66,7 +66,7 @@ function tokenUser(db, token) {
 function readBody(req) {
   return new Promise(resolve => {
     let b = '';
-    req.on('data', c => { b += c; if (b.length > 24e6) req.destroy(); });
+    req.on('data', c => { b += c; if (b.length > 72e6) req.destroy(); });   // ~72MB cap (base64 → ~53MB real file)
     req.on('end', () => { try { resolve(b ? JSON.parse(b) : {}); } catch (e) { resolve({}); } });
   });
 }
@@ -159,6 +159,15 @@ async function handleApi(req, res, urlPath, query) {
   if (urlPath === '/api/users' && method === 'GET') {
     if (!isAdmin) return json(res, 403, {error: 'للمدير فقط.'});
     return json(res, 200, {ok: true, users: db.users.map(publicUser)});
+  }
+
+  // GET /api/directory — any signed-in user: minimal contact list (name/role/levels)
+  // for messaging. Excludes pending/rejected accounts and all sensitive fields.
+  if (urlPath === '/api/directory' && method === 'GET') {
+    if (!me) return json(res, 401, {error: 'غير مسجّل الدخول.'});
+    const dir = db.users.filter(u => u.status === 'active')
+      .map(u => ({u: u.u, name: u.name, role: u.role, levels: u.levels || [], child: u.child || ''}));
+    return json(res, 200, {ok: true, users: dir});
   }
 
   // POST /api/users {action,u,patch} — admin only
