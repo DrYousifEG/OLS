@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>OLS — نظام التعلّم العُماني</title>
+<link rel="icon" type="image/svg+xml" href="assets/logo.svg">
+<link rel="manifest" href="manifest.json">
+<meta name="theme-color" content="#0e7c66">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="OLS">
+<link rel="apple-touch-icon" href="assets/logo.svg">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800&family=Tajawal:wght@400;500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="styles.css?v=1.1">
+</head>
+<body>
+<div id="app-shell" hidden>
+  <aside id="sidebar">
+    <div class="brand">
+      <div class="brand-logo"><img src="assets/logo.svg" alt="OLS"></div>
+      <div class="brand-name">
+        <span class="brand-en">OLS</span>
+        <span class="brand-sub">نظام التعلّم العُماني</span>
+      </div>
+    </div>
+    <nav id="nav">
+      <a href="#/" data-view="dashboard" class="nav-item"><span class="ico">🏠</span> الرئيسية</a>
+      <a href="#/curriculum" data-view="curriculum" class="nav-item"><span class="ico">📚</span> المناهج</a>
+      <a href="#/library" data-view="library" class="nav-item"><span class="ico">🗂️</span> المكتبة</a>
+      <a href="#/lessons" data-view="lessons" class="nav-item"><span class="ico">🎬</span> الحصص</a>
+      <a href="#/exercises" data-view="exercises" class="nav-item"><span class="ico">✏️</span> التمارين</a>
+      <a href="#/tests" data-view="tests" class="nav-item"><span class="ico">📝</span> الاختبارات</a>
+      <a href="#/results" data-view="results" class="nav-item"><span class="ico">📊</span> النتائج</a>
+      <a href="#/assistant" data-view="assistant" class="nav-item"><span class="ico">🤖</span> المساعد</a>
+      <a href="#/kindergarten" data-view="kindergarten" class="nav-item kg-item"><span class="ico">🧸</span> الروضة</a>
+      <a href="#/users" data-view="users" class="nav-item" id="nav-users"><span class="ico">👥</span> المستخدمون</a>
+    </nav>
+    <div class="sidebar-foot">
+      <button class="install-btn" id="install-app" hidden title="تثبيت OLS كتطبيق">📲 تثبيت التطبيق</button>
+      <div class="foot-user" id="foot-user"></div>
+      <div class="foot-meta" id="foot-meta"></div>
+    </div>
+  </aside>
+
+  <main id="main">
+    <header id="topbar">
+      <button id="menu-btn" aria-label="القائمة"><svg viewBox="0 0 24 24"><path d="M3 18h18v-2H3v2zm0-5h18v-2H3v2zm0-7v2h18V6H3z"/></svg></button>
+      <div id="crumbs"></div>
+      <div class="topbar-right">
+        <div class="global-search">
+          <svg viewBox="0 0 24 24"><path d="M15.5 14h-.79l-.28-.27a6.5 6.5 0 1 0-.7.7l.27.28v.79l5 4.99L20.49 19l-4.99-5zm-6 0A4.5 4.5 0 1 1 14 9.5 4.5 4.5 0 0 1 9.5 14z"/></svg>
+          <input id="global-search" type="text" placeholder="ابحث في المناهج والدروس…" autocomplete="off">
+          <div id="search-results"></div>
+        </div>
+        <div id="today-chip"></div>
+      </div>
+    </header>
+    <div id="view"></div>
+  </main>
+</div>
+<div id="auth-screen"></div>
+<div id="modal-root"></div>
+<div id="toast-root"></div>
+<script src="data.js?v=1.1"></script>
+<script src="app.js?v=1.1"></script>
+</body>
+</html>

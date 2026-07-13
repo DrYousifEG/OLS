@@ -1,0 +1,17 @@
+{
+  "name": "OLS — نظام التعلّم العُماني",
+  "short_name": "OLS",
+  "description": "منصّة تعليمية تفاعلية للمنهج الدراسي العُماني من الروضة إلى الصف الثاني عشر.",
+  "lang": "ar",
+  "dir": "rtl",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "orientation": "any",
+  "background_color": "#0b3b34",
+  "theme_color": "#0e7c66",
+  "icons": [
+    {"src": "assets/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any"},
+    {"src": "assets/logo.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "maskable"}
+  ]
+}
