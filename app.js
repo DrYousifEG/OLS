@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.3 · 2026-07-14';
+const APP_VERSION = 'v1.4 · 2026-07-14';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -117,9 +117,19 @@ function checkUploadSize(file, isMedia) {
 function fileToDataURL(file) {
   return new Promise((resolve, reject) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.onerror = reject; r.readAsDataURL(file); });
 }
-async function uploadBlob(key, dataUrl) {
-  if (!Store.server) { Store._writeLocal('blob-' + key, dataUrl); return {ok: true, local: true}; }
-  return api('/api/blob', 'POST', {key, dataUrl});
+/* Upload in ~1.5MB chunks — shared hosts (Hostinger LiteSpeed proxy etc.) reject
+   large request bodies, which silently killed real video/audio uploads. Small
+   sequential parts always get through. onProgress(0–100) drives the UI. */
+async function uploadBlob(key, dataUrl, onProgress) {
+  if (!Store.server) { Store._writeLocal('blob-' + key, dataUrl); if (onProgress) onProgress(100); return {ok: true, local: true}; }
+  const CH = 1500000;
+  if (dataUrl.length <= CH) { const r = await api('/api/blob', 'POST', {key, dataUrl}); if (onProgress) onProgress(100); return r; }
+  const parts = Math.ceil(dataUrl.length / CH);
+  for (let i = 0; i < parts; i++) {
+    await api('/api/blob', 'POST', {key, part: dataUrl.slice(i * CH, (i + 1) * CH), seq: i, parts});
+    if (onProgress) onProgress(Math.round(((i + 1) / parts) * 100));
+  }
+  return {ok: true};
 }
 function fileUrl(key, name, dl) {
   if (Store.server) return '/api/file?key=' + encodeURIComponent(key) + '&token=' + encodeURIComponent(Store.token) + (name ? '&name=' + encodeURIComponent(name) : '') + (dl ? '&dl=1' : '');
@@ -157,7 +167,15 @@ function removeContent(storeKey, id, seedList) {
   Store.set(storeKey, c);
 }
 function library() { return mergeById(DATA.library, Store.get('library', [])); }
-function lessons() { return mergeById(DATA.lessons, Store.get('lessons', [])); }
+function lessons() {
+  // self-heal records saved by the old buggy "add" flow (missing id) so they
+  // reappear and stay individually addressable
+  const c = Store.get('lessons', []);
+  let fixed = false;
+  c.forEach(x => { if (x && !x.id && !x._deleted) { x.id = uid(); fixed = true; } });
+  if (fixed) Store.set('lessons', c);
+  return mergeById(DATA.lessons, c);
+}
 function tests() { return mergeById(DATA.tests, Store.get('tests', [])); }
 function results() { return Store.get('results', []); }
 function addResult(rec) { const r = results(); r.push(rec); Store.set('results', r); }
@@ -348,8 +366,8 @@ function libDetail(id) {
   const isImg = isUpload && /^(PNG|JPG|JPEG|WEBP|GIF)$/i.test(i.ext || '');
   const isPdf = isUpload && /^PDF$/i.test(i.ext || '');
   // inline preview pane: PDFs via typed /api/file URL in an iframe, images directly
-  const preview = isImg ? `<img src="${esc(openUrl)}" style="width:100%;max-height:58vh;object-fit:contain;border-radius:12px;background:#f3f6f5">`
-    : isPdf ? `<iframe src="${esc(openUrl)}" style="width:100%;height:58vh;border:1px solid var(--line);border-radius:12px;background:#f3f6f5" title="معاينة"></iframe>
+  const preview = isImg ? `<img id="lib-preview" src="${esc(openUrl)}" style="width:100%;max-height:58vh;object-fit:contain;border-radius:12px;background:#f3f6f5">`
+    : isPdf ? `<iframe id="lib-preview" src="${esc(openUrl)}" style="width:100%;height:58vh;border:1px solid var(--line);border-radius:12px;background:#f3f6f5" title="معاينة"></iframe>
        <p class="muted" style="font-size:.78rem;margin:6px 0 0">إن لم تظهر المعاينة على هاتفك، استخدم زر «فتح في نافذة جديدة».</p>`
     : '';
   const body = `
@@ -364,10 +382,13 @@ function libDetail(id) {
     </div>
     ${preview ? `<div style="margin-top:14px">${preview}</div>` : ''}`;
   const foot = `
+    ${preview ? `<button class="btn" id="lib-fs">⛶ ملء الشاشة</button>` : ''}
     <a class="btn primary" href="${esc(openUrl)}" target="_blank" rel="noopener">↗ فتح في نافذة جديدة</a>
     ${isUpload ? `<a class="btn" href="${fileUrl(i.blobKey, i.title, true)}" download>⬇ تنزيل</a>` : ''}
     ${Auth.canDelete ? `<button class="btn danger" id="lib-del">🗑 حذف</button>` : ''}`;
   const m = modal(i.title, body, foot, {wide: true});
+  const lfs = $('#lib-fs', m.el);
+  if (lfs) lfs.onclick = () => { const p = $('#lib-preview', m.el); if (p && p.requestFullscreen) p.requestFullscreen(); };
   const del = $('#lib-del', m.el);
   if (del) del.onclick = () => armed(del, () => { removeContent('library', id, DATA.library); m.close(); toast('تم الحذف', 'ok'); PAGES.library(); });
 };
@@ -390,7 +411,8 @@ function addBookModal() {
     kind = c.dataset.kind; $$('[data-kind]', m.el).forEach(x => x.classList.toggle('active', x === c));
     $('#b-link-f', m.el).hidden = kind !== 'link'; $('#b-file-f', m.el).hidden = kind !== 'file';
   });
-  $('#b-save', m.el).onclick = async () => {
+  const bSave = $('#b-save', m.el);
+  bSave.onclick = async () => {
     const title = $('#b-title', m.el).value.trim(); if (!title) return toast('أدخل العنوان', 'err');
     const item = {id: uid(), title, author: $('#b-author', m.el).value.trim(), subject: $('#b-subject', m.el).value.trim() || 'عام',
       grade: +$('#b-grade', m.el).value, desc: $('#b-desc', m.el).value.trim(), cover: '#0e7c66'};
@@ -398,11 +420,16 @@ function addBookModal() {
     else {
       const f = $('#b-file', m.el).files[0]; if (!f) return toast('اختر ملفًا', 'err');
       if (!checkUploadSize(f, false)) return;
-      toast('جارٍ الرفع…'); const dataUrl = await fileToDataURL(f); const key = 'lib-' + item.id;
-      try { await uploadBlob(key, dataUrl); } catch (e) { return toast('تعذّر الرفع — تأكّد من الاتصال وحجم الملف.', 'err'); }
+      bSave.disabled = true; bSave.textContent = '… يقرأ الملف';
+      let dataUrl; try { dataUrl = await fileToDataURL(f); } catch (e) { bSave.disabled = false; bSave.textContent = 'حفظ'; return toast('تعذّرت قراءة الملف.', 'err'); }
+      const key = 'lib-' + item.id;
+      try { await uploadBlob(key, dataUrl, p => { bSave.textContent = 'جارٍ الرفع… ' + num(p) + '%'; }); }
+      catch (e) { bSave.disabled = false; bSave.textContent = 'حفظ'; return toast('تعذّر الرفع — تأكّد من الاتصال وحجم الملف.', 'err'); }
       item.kind = 'file'; item.blobKey = key; item.ext = (f.name.split('.').pop() || '').toUpperCase();
     }
-    const c = Store.get('library', []); c.push(item); Store.set('library', c); m.close(); toast('تمت الإضافة', 'ok'); PAGES.library();
+    const c = Store.get('library', []); c.push(item); Store.set('library', c);
+    m.close(); toast('تمت الإضافة', 'ok'); PAGES.library();
+    libDetail(item.id);                            // show the uploaded item immediately
   };
 }
 
@@ -415,7 +442,9 @@ PAGES.lessons = function () {
       ${Auth.canManage ? `<button class="btn primary" id="add-lesson">➕ إضافة حصة</button>` : ''}</div>
     <div class="lesson-grid">${items.map(lessonCard).join('') || `<div class="empty"><div class="big">🎬</div>لا توجد حصص بعد.</div>`}</div>`;
   $$('[data-lesson]').forEach(c => c.onclick = () => openLesson(c.dataset.lesson));
-  const add = $('#add-lesson'); if (add) add.onclick = addLessonModal;
+  // NOTE: never pass the click event into addLessonModal — it would be mistaken
+  // for an existing lesson and the new lesson would be saved without an id.
+  const add = $('#add-lesson'); if (add) add.onclick = () => addLessonModal();
 };
 function lessonCard(l) {
   const icon = l.type === 'audio' ? '🎧' : '▶';
@@ -441,7 +470,7 @@ function openLesson(id) {
   const body = `${stage}
     <div style="margin-top:14px"><p>${esc(l.desc || '')}</p>
     <div class="row"><span class="pill teal">${esc(l.subject || 'عام')}</span>${l.grade ? `<span class="pill">${gradeName(l.grade)}</span>` : ''}<span class="pill">${l.type === 'audio' ? '🎧 صوت' : '🎬 فيديو'}</span></div></div>`;
-  const foot = `${(src && l.type !== 'audio' && !isEmbed) ? `<button class="btn" id="les-fs">⛶ ملء الشاشة</button>` : ''}
+  const foot = `${(src && l.type !== 'audio') ? `<button class="btn" id="les-fs">⛶ ملء الشاشة</button>` : ''}
     ${l.blobKey ? `<a class="btn" href="${fileUrl(l.blobKey, l.title, true)}" download>⬇ تنزيل</a>` : ''}
     ${Auth.canManage ? `<button class="btn" id="les-replace">🔁 ${src ? 'استبدال المحتوى' : 'رفع المحتوى'}</button>` : ''}
     ${Auth.canDelete ? `<button class="btn danger" id="les-del">🗑 حذف الحصة</button>` : ''}`;
@@ -456,11 +485,12 @@ function openLesson(id) {
   });
 }
 function embedUrl(u) {
-  const yt = u.match(/(?:youtu\.be\/|v=)([\w-]{11})/); if (yt) return 'https://www.youtube.com/embed/' + yt[1];
+  const yt = u.match(/(?:youtu\.be\/|v=|\/shorts\/|\/embed\/)([\w-]{11})/); if (yt) return 'https://www.youtube.com/embed/' + yt[1];
   const dr = u.match(/drive\.google\.com\/file\/d\/([^/]+)/); if (dr) return 'https://drive.google.com/file/d/' + dr[1] + '/preview';
   return u;
 }
 function addLessonModal(existing) {
+  if (existing && !existing.id) existing = null;   // guard: ignore event objects / junk args
   const e = existing || {};
   const body = `
     <div class="field"><label>عنوان الحصة</label><input id="l-title" value="${esc(e.title || '')}"></div>
@@ -478,21 +508,37 @@ function addLessonModal(existing) {
   let type = e.type || 'video', srcKind = 'file';
   $$('[data-t]', m.el).forEach(b => b.onclick = () => { type = b.dataset.t; $$('[data-t]', m.el).forEach(x => x.classList.toggle('active', x === b)); });
   $$('[data-s]', m.el).forEach(b => b.onclick = () => { srcKind = b.dataset.s; $$('[data-s]', m.el).forEach(x => x.classList.toggle('active', x === b)); $('#l-file-f', m.el).hidden = srcKind !== 'file'; $('#l-embed-f', m.el).hidden = srcKind !== 'embed'; });
-  $('#l-save', m.el).onclick = async () => {
+  const saveBtn = $('#l-save', m.el);
+  saveBtn.onclick = async () => {
     const title = $('#l-title', m.el).value.trim(); if (!title) return toast('أدخل العنوان', 'err');
     const item = existing ? Object.assign({}, existing) : {id: uid()};
+    if (!item.id) item.id = uid();
     item.title = title; item.subject = $('#l-subject', m.el).value.trim(); item.grade = +$('#l-grade', m.el).value;
     item.desc = $('#l-desc', m.el).value.trim(); item.type = type;
     if (srcKind === 'embed') { item.embed = $('#l-embed', m.el).value.trim(); item.blobKey = ''; if (!item.embed) return toast('أدخل الرابط', 'err'); }
     else {
       const f = $('#l-file', m.el).files[0];
       if (!f && !existing) return toast('اختر ملفًا', 'err');
-      if (f) { if (!checkUploadSize(f, true)) return; toast('جارٍ رفع المحتوى…'); const dataUrl = await fileToDataURL(f); const key = 'les-' + item.id; try { await uploadBlob(key, dataUrl); } catch (er) { return toast('تعذّر الرفع — للفيديوهات الكبيرة استخدم رابط YouTube/Drive.', 'err'); } item.blobKey = key; item.embed = ''; }
+      if (f) {
+        if (!checkUploadSize(f, true)) return;
+        saveBtn.disabled = true;
+        const label = t => { saveBtn.textContent = t; };
+        label('… يقرأ الملف');
+        let dataUrl; try { dataUrl = await fileToDataURL(f); } catch (er) { saveBtn.disabled = false; label(existing ? 'تحديث' : 'حفظ الحصة'); return toast('تعذّرت قراءة الملف.', 'err'); }
+        const key = 'les-' + item.id;
+        try { await uploadBlob(key, dataUrl, p => label('جارٍ الرفع… ' + num(p) + '%')); }
+        catch (er) { saveBtn.disabled = false; label(existing ? 'تحديث' : 'حفظ الحصة'); return toast('تعذّر الرفع — للفيديوهات الكبيرة استخدم رابط YouTube/Drive.', 'err'); }
+        item.blobKey = key; item.embed = '';
+      }
     }
     const c = Store.get('lessons', []);
     const idx = c.findIndex(x => x.id === item.id);
     if (idx >= 0) c[idx] = item; else c.push(item);
-    Store.set('lessons', c); m.close(); toast(existing ? 'تم التحديث' : 'تمت الإضافة', 'ok'); PAGES.lessons();
+    Store.set('lessons', c);
+    m.close();                                     // close the entry form…
+    toast(existing ? 'تم التحديث' : 'تمت الإضافة', 'ok');
+    PAGES.lessons();
+    openLesson(item.id);                           // …and show the media immediately
   };
 }
 

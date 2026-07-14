@@ -22,7 +22,7 @@ const ROOT = __dirname;
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 /* must match APP_VERSION in app.js — check what's live at /api/version */
-const APP_VERSION = 'v1.3 · 2026-07-14';
+const APP_VERSION = 'v1.4 · 2026-07-14';
 const STARTED = new Date().toISOString();
 
 function pickDataDir() {
@@ -246,6 +246,21 @@ async function handleApi(req, res, urlPath, query) {
   }
   if (urlPath === '/api/blob' && method === 'POST') {
     if (!me) return json(res, 401, {error: 'غير مسجّل الدخول.'});
+    // chunked upload: {key, part, seq, parts} — small requests survive shared-host
+    // proxy body limits; parts are appended and finalized on the last one.
+    if (typeof body.part === 'string' && body.key) {
+      try {
+        if (!fs.existsSync(BLOB_DIR)) fs.mkdirSync(BLOB_DIR, {recursive: true});
+        const tmp = blobFile(body.key) + '.part';
+        if (Number(body.seq) === 0) fs.writeFileSync(tmp, body.part); else fs.appendFileSync(tmp, body.part);
+        if (Number(body.seq) >= Number(body.parts) - 1) {
+          fs.renameSync(tmp, blobFile(body.key));
+          const meta = loadJson(BLOBMETA_FILE, {}); meta[body.key] = Date.now(); saveJson(BLOBMETA_FILE, meta);
+          return json(res, 200, {ok: true, done: true, t: meta[body.key]});
+        }
+        return json(res, 200, {ok: true, seq: Number(body.seq)});
+      } catch (e) { return json(res, 500, {error: 'تعذّر تخزين جزء الملف.'}); }
+    }
     if (!body.key || !body.dataUrl) return json(res, 400, {error: 'key و dataUrl مطلوبان.'});
     try { if (!fs.existsSync(BLOB_DIR)) fs.mkdirSync(BLOB_DIR, {recursive: true}); fs.writeFileSync(blobFile(body.key), body.dataUrl); }
     catch (e) { return json(res, 500, {error: 'تعذّر تخزين الملف.'}); }
@@ -269,12 +284,29 @@ async function handleApi(req, res, urlPath, query) {
     const mime = m[1] || 'application/octet-stream';
     const buf = m[2] ? Buffer.from(m[3], 'base64') : Buffer.from(decodeURIComponent(m[3]));
     const safeName = String(query.name || 'document').replace(/[^\w.\- ]/g, '_');
-    res.writeHead(200, {
+    const baseHeaders = {
       'Content-Type': mime,
       'Content-Disposition': (query.dl ? 'attachment' : 'inline') + '; filename="' + safeName + '"',
-      'Content-Length': buf.length,
+      'Accept-Ranges': 'bytes',
       'Cache-Control': 'no-store'
-    });
+    };
+    // HTTP Range support — video/audio elements (especially on phones) need 206
+    // partial responses to start playback and to seek.
+    const range = /^bytes=(\d*)-(\d*)$/.exec(req.headers.range || '');
+    if (range && (range[1] || range[2])) {
+      let start = range[1] ? parseInt(range[1], 10) : 0;
+      let end = range[2] ? Math.min(parseInt(range[2], 10), buf.length - 1) : buf.length - 1;
+      if (!range[1] && range[2]) { start = Math.max(0, buf.length - parseInt(range[2], 10)); end = buf.length - 1; }
+      if (start > end || start >= buf.length) {
+        res.writeHead(416, {'Content-Range': 'bytes */' + buf.length}); return res.end();
+      }
+      res.writeHead(206, Object.assign({}, baseHeaders, {
+        'Content-Range': 'bytes ' + start + '-' + end + '/' + buf.length,
+        'Content-Length': end - start + 1
+      }));
+      return res.end(buf.slice(start, end + 1));
+    }
+    res.writeHead(200, Object.assign({}, baseHeaders, {'Content-Length': buf.length}));
     return res.end(buf);
   }
   if (urlPath === '/api/blobmeta' && method === 'GET') {
