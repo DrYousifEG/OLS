@@ -1,6 +1,6 @@
 {
   "name": "ols-learning",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "private": true,
   "description": "OLS — Omani Learning System. Interactive learning platform for grades KG–12 (static single-page app + zero-dependency Node server).",
   "main": "server.js",

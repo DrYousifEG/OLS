@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.2 · 2026-07-14';
+const APP_VERSION = 'v1.3 · 2026-07-14';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -142,9 +142,23 @@ const Auth = {
 /* ============================== DATA ACCESSORS ========================== */
 const DATA = window.APP_DATA;
 const gradeName = g => g === 0 ? 'رياض الأطفال' : ('الصف ' + (DATA.gradeNames[g] || g));
-function library() { const custom = Store.get('library', []); return DATA.library.concat(custom); }
-function lessons() { const custom = Store.get('lessons', []); return DATA.lessons.concat(custom); }
-function tests() { const custom = Store.get('tests', []); return DATA.tests.concat(custom); }
+/* Merge seed + user content by id: a saved copy with the same id REPLACES the
+   seed (fixes "replaced content never displays"); a {_deleted} tombstone hides
+   a seed item permanently. */
+function mergeById(seed, custom) {
+  const map = new Map();
+  seed.forEach(x => map.set(x.id, x));
+  (custom || []).forEach(x => { if (x && x.id) { if (x._deleted) map.delete(x.id); else map.set(x.id, x); } });
+  return Array.from(map.values());
+}
+function removeContent(storeKey, id, seedList) {
+  let c = Store.get(storeKey, []).filter(x => x.id !== id);
+  if (seedList.some(x => x.id === id)) c.push({id, _deleted: true});   // tombstone for seed items
+  Store.set(storeKey, c);
+}
+function library() { return mergeById(DATA.library, Store.get('library', [])); }
+function lessons() { return mergeById(DATA.lessons, Store.get('lessons', [])); }
+function tests() { return mergeById(DATA.tests, Store.get('tests', [])); }
 function results() { return Store.get('results', []); }
 function addResult(rec) { const r = results(); r.push(rec); Store.set('results', r); }
 
@@ -331,23 +345,31 @@ function libDetail(id) {
   const i = library().find(x => x.id === id); if (!i) return;
   const isUpload = i.kind === 'file';
   const openUrl = isUpload ? fileUrl(i.blobKey, i.title) : i.url;
+  const isImg = isUpload && /^(PNG|JPG|JPEG|WEBP|GIF)$/i.test(i.ext || '');
+  const isPdf = isUpload && /^PDF$/i.test(i.ext || '');
+  // inline preview pane: PDFs via typed /api/file URL in an iframe, images directly
+  const preview = isImg ? `<img src="${esc(openUrl)}" style="width:100%;max-height:58vh;object-fit:contain;border-radius:12px;background:#f3f6f5">`
+    : isPdf ? `<iframe src="${esc(openUrl)}" style="width:100%;height:58vh;border:1px solid var(--line);border-radius:12px;background:#f3f6f5" title="معاينة"></iframe>
+       <p class="muted" style="font-size:.78rem;margin:6px 0 0">إن لم تظهر المعاينة على هاتفك، استخدم زر «فتح في نافذة جديدة».</p>`
+    : '';
   const body = `
     <div style="display:flex;gap:16px;flex-wrap:wrap">
-      <div class="book-cover" style="width:130px;height:170px;border-radius:12px;background:linear-gradient(135deg,${i.cover || '#0e7c66'},${i.cover2 || '#12a37d'})">${esc(i.title)}</div>
+      <div class="book-cover" style="width:110px;height:140px;border-radius:12px;background:linear-gradient(135deg,${i.cover || '#0e7c66'},${i.cover2 || '#12a37d'})">${esc(i.title)}</div>
       <div style="flex:1;min-width:200px">
-        <p><b>المؤلف/المصدر:</b> ${esc(i.author || '—')}</p>
-        <p><b>المادة:</b> ${esc(i.subject || 'عام')}</p>
-        <p><b>المرحلة:</b> ${i.grade ? gradeName(i.grade) : 'عام'}</p>
-        <p class="muted">${esc(i.desc || '')}</p>
+        <p style="margin:.2em 0"><b>المؤلف/المصدر:</b> ${esc(i.author || '—')}</p>
+        <p style="margin:.2em 0"><b>المادة:</b> ${esc(i.subject || 'عام')}</p>
+        <p style="margin:.2em 0"><b>المرحلة:</b> ${i.grade ? gradeName(i.grade) : 'عام'}</p>
+        <p class="muted" style="margin:.2em 0">${esc(i.desc || '')}</p>
       </div>
-    </div>`;
+    </div>
+    ${preview ? `<div style="margin-top:14px">${preview}</div>` : ''}`;
   const foot = `
-    <a class="btn primary" href="${esc(openUrl)}" target="_blank" rel="noopener">📖 فتح / قراءة</a>
+    <a class="btn primary" href="${esc(openUrl)}" target="_blank" rel="noopener">↗ فتح في نافذة جديدة</a>
     ${isUpload ? `<a class="btn" href="${fileUrl(i.blobKey, i.title, true)}" download>⬇ تنزيل</a>` : ''}
-    ${Auth.canDelete && (i.kind === 'file' || String(i.id).length > 8) ? `<button class="btn danger" id="lib-del">🗑 حذف</button>` : ''}`;
+    ${Auth.canDelete ? `<button class="btn danger" id="lib-del">🗑 حذف</button>` : ''}`;
   const m = modal(i.title, body, foot, {wide: true});
   const del = $('#lib-del', m.el);
-  if (del) del.onclick = () => armed(del, () => { const c = Store.get('library', []).filter(x => x.id !== id); Store.set('library', c); m.close(); toast('تم الحذف', 'ok'); PAGES.library(); });
+  if (del) del.onclick = () => armed(del, () => { removeContent('library', id, DATA.library); m.close(); toast('تم الحذف', 'ok'); PAGES.library(); });
 };
 function addBookModal() {
   const body = `
@@ -409,21 +431,28 @@ function openLesson(id) {
   const l = lessons().find(x => x.id === id); if (!l) return;
   let stage = '';
   const src = l.blobKey ? fileUrl(l.blobKey, l.title) : l.embed;
-  if (!src) stage = `<div class="media-stage audio" style="text-align:center;color:#fff"><div style="font-size:3rem">🎬</div><p>لم يُرفع محتوى لهذه الحصة بعد.</p></div>`;
-  else if (l.type === 'audio') stage = `<div class="media-stage audio"><div style="text-align:center;color:#fff;margin-bottom:12px;font-size:2.4rem">🎧</div><audio src="${esc(src)}" controls controlsList="nodownload" style="width:100%"></audio></div>`;
-  else if (l.embed && /youtube|vimeo|drive\.google/.test(l.embed)) stage = `<div class="media-stage"><iframe src="${esc(embedUrl(l.embed))}" style="height:52vh" allowfullscreen frameborder="0"></iframe></div>`;
-  else stage = `<div class="media-stage"><video src="${esc(src)}" controls playsinline style="max-height:60vh"></video></div>`;
+  const isEmbed = !l.blobKey && l.embed && /youtube|vimeo|drive\.google/.test(l.embed);
+  if (!src) stage = `<div class="media-stage audio" style="text-align:center;color:#fff">
+      <div style="font-size:3rem">🎬</div><p>لم يُرفع محتوى لهذه الحصة بعد.</p>
+      ${Auth.canManage ? `<button class="btn gold" id="les-upload-cta">⬆ رفع فيديو / صوت الآن</button>` : `<p class="muted" style="color:#cfe9e2;font-size:.8rem">سيضيف المعلّم المحتوى قريبًا.</p>`}</div>`;
+  else if (l.type === 'audio') stage = `<div class="media-stage audio"><div style="text-align:center;color:#fff;margin-bottom:12px;font-size:2.4rem">🎧</div><audio id="les-media" src="${esc(src)}" controls style="width:100%"></audio></div>`;
+  else if (isEmbed) stage = `<div class="media-stage"><iframe id="les-media" src="${esc(embedUrl(l.embed))}" style="height:52vh" allowfullscreen frameborder="0"></iframe></div>`;
+  else stage = `<div class="media-stage"><video id="les-media" src="${esc(src)}" controls playsinline preload="metadata" style="max-height:58vh"></video></div>`;
   const body = `${stage}
     <div style="margin-top:14px"><p>${esc(l.desc || '')}</p>
-    <div class="row"><span class="pill teal">${esc(l.subject || 'عام')}</span>${l.grade ? `<span class="pill">${gradeName(l.grade)}</span>` : ''}<span class="pill">${l.type === 'audio' ? 'صوت' : 'فيديو'}</span></div></div>`;
-  const foot = `${l.blobKey ? `<a class="btn" href="${fileUrl(l.blobKey, l.title, true)}" download>⬇ تنزيل</a>` : ''}
-    ${Auth.canManage ? `<button class="btn" id="les-replace">🔁 استبدال المحتوى</button>` : ''}
+    <div class="row"><span class="pill teal">${esc(l.subject || 'عام')}</span>${l.grade ? `<span class="pill">${gradeName(l.grade)}</span>` : ''}<span class="pill">${l.type === 'audio' ? '🎧 صوت' : '🎬 فيديو'}</span></div></div>`;
+  const foot = `${(src && l.type !== 'audio' && !isEmbed) ? `<button class="btn" id="les-fs">⛶ ملء الشاشة</button>` : ''}
+    ${l.blobKey ? `<a class="btn" href="${fileUrl(l.blobKey, l.title, true)}" download>⬇ تنزيل</a>` : ''}
+    ${Auth.canManage ? `<button class="btn" id="les-replace">🔁 ${src ? 'استبدال المحتوى' : 'رفع المحتوى'}</button>` : ''}
     ${Auth.canDelete ? `<button class="btn danger" id="les-del">🗑 حذف الحصة</button>` : ''}`;
   const m = modal(l.title, body, foot, {wide: true});
+  const fs = $('#les-fs', m.el);
+  if (fs) fs.onclick = () => { const v = $('#les-media', m.el); if (v && v.requestFullscreen) v.requestFullscreen(); else if (v && v.webkitEnterFullscreen) v.webkitEnterFullscreen(); };
+  const cta = $('#les-upload-cta', m.el); if (cta) cta.onclick = () => { m.close(); addLessonModal(l); };
   const rep = $('#les-replace', m.el); if (rep) rep.onclick = () => { m.close(); addLessonModal(l); };
   const del = $('#les-del', m.el);
   if (del) del.onclick = () => armed(del, () => {
-    const c = Store.get('lessons', []).filter(x => x.id !== id); Store.set('lessons', c); m.close(); toast('تم الحذف', 'ok'); PAGES.lessons();
+    removeContent('lessons', id, DATA.lessons); m.close(); toast('تم الحذف', 'ok'); PAGES.lessons();
   });
 }
 function embedUrl(u) {
@@ -927,11 +956,17 @@ function kgGame(kind) {
       <p id="kg-fb" style="height:30px;font-weight:800;font-size:1.3rem;margin-top:12px"></p></div>`;
     const m = modal('🧸 لعبة', body, '');
     $$('.kg-choice', m.el).forEach(btn => btn.onclick = () => {
-      const fb = $('#kg-fb', m.el);
-      if (btn.dataset.c === g.answer) { score++; fb.textContent = '🎉 أحسنت!'; fb.style.color = 'var(--green)'; }
-      else { fb.textContent = '💛 حاول مرة أخرى — الصواب: ' + g.answer; fb.style.color = '#d6336c'; }
+      const ok = btn.dataset.c === g.answer;
+      if (ok) score++;
       $$('.kg-choice', m.el).forEach(b => b.disabled = true);
-      setTimeout(() => { round++; m.close(); if (round >= rounds) kgDone(score, rounds); else play(); }, 1100);
+      // full-screen result inside the modal — always visible on phones before advancing
+      const box = $('.kg-play', m.el);
+      if (box) box.innerHTML = `<div style="padding:26px 10px;text-align:center">
+        <div style="font-size:4.4rem;line-height:1">${ok ? '🎉' : '💛'}</div>
+        <h2 style="color:${ok ? 'var(--green)' : '#d6336c'};margin:.4em 0">${ok ? 'أحسنت!' : 'الإجابة الصحيحة:'}</h2>
+        ${ok ? '' : `<div style="font-size:2.6rem;font-weight:900;color:var(--teal-ink)">${num(esc(g.answer))}</div>`}
+        <div class="kg-star" style="margin-top:10px">⭐ ${num(score)} <span class="muted" style="font-size:.9rem">· ${num(round + 1)}/${num(rounds)}</span></div></div>`;
+      setTimeout(() => { round++; m.close(); if (round >= rounds) kgDone(score, rounds); else play(); }, 1600);
     });
   };
   play();
@@ -986,7 +1021,7 @@ function renderUsers(users) {
     ${pending.length ? `<div class="card" style="border-color:var(--gold);margin-bottom:14px"><b>⏳ ${num(pending.length)} طلب بانتظار الموافقة</b></div>` : ''}
     <div class="card" style="padding:0;overflow:auto"><table class="tbl">
       <tr><th>المستخدم</th><th>الدور</th><th>التخصيص / النطاق</th><th>الحالة</th><th>الإنشاء</th><th>إجراءات</th></tr>${rows}</table></div>`;
-  const act = async (u, action, patch) => { try { const r = await api('/api/users', 'POST', {u, action, patch}); renderUsers(r.users); loadDirectory(); toast('تم', 'ok'); } catch (e) { toast(e.message, 'err'); } };
+  const act = async (u, action, patch) => { try { const r = await api('/api/users', 'POST', {u, action, patch}); renderUsers(r.users); loadDirectory(); updatePendingBadge(); toast('تم', 'ok'); } catch (e) { toast(e.message, 'err'); } };
   $$('[data-approve]').forEach(b => b.onclick = () => act(b.dataset.approve, 'approve'));
   $$('[data-reject]').forEach(b => b.onclick = () => act(b.dataset.reject, 'reject'));
   $$('[data-del]').forEach(b => b.onclick = () => armed(b, () => act(b.dataset.del, 'remove')));
@@ -1034,12 +1069,18 @@ function roleMatrixCard() {
     ['إدارة المستخدمين والموافقات', 1, 0, 0, 0, 0],
     ['تخصيص الأدوار والمستويات', 1, 0, 0, 0, 0],
   ];
-  const cell = v => v === 1 ? '<span class="yes">✓</span>' : v === 0 ? '<span class="no">✕</span>' : `<span class="muted" style="font-size:.78rem">${v}</span>`;
-  const heads = ['👑 مدير', '📗 معلم', '🎒 طالب', '👪 ولي أمر', '👁️ زائر'];
-  return `<div class="card" style="margin-top:16px;overflow:auto">
+  const cell = v => v === 1 ? '<td class="c-yes">✓</td>' : v === 0 ? '<td class="c-no">✕</td>' : `<td class="c-scope">${v}</td>`;
+  const heads = ['👑<br>مدير', '📗<br>معلم', '🎒<br>طالب', '👪<br>ولي أمر', '👁️<br>زائر'];
+  return `<div class="card" style="margin-top:16px">
     <div class="section-title" style="margin-top:0">🧩 مصفوفة صلاحيات الأدوار</div>
-    <table class="matrix"><tr><th>القدرة</th>${heads.map(h => `<th>${h}</th>`).join('')}</tr>
-    ${caps.map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(cell).join('')}</tr>`).join('')}</table></div>`;
+    <div class="matrix-wrap"><table class="matrix">
+      <thead><tr><th>القدرة</th>${heads.map(h => `<th>${h}</th>`).join('')}</tr></thead>
+      <tbody>${caps.map(r => `<tr><td>${r[0]}</td>${r.slice(1).map(cell).join('')}</tr>`).join('')}</tbody>
+    </table></div>
+    <div class="row" style="margin-top:10px;font-size:.78rem;gap:14px">
+      <span><span class="yes" style="color:var(--green);font-weight:800">✓</span> مسموح</span>
+      <span><span style="color:#c7d2cc;font-weight:800">✕</span> غير مسموح</span>
+      <span class="muted">النص = نطاق محدود</span></div></div>`;
 }
 async function inviteModal() {
   const roles = ['معلم', 'طالب', 'ولي أمر', 'زائر'];
@@ -1136,7 +1177,16 @@ function showAuth(tab, inviteToken, flags) {
     if (mode === 'login') {
       f.innerHTML = `<div class="field"><label>اسم المستخدم</label><input id="a-u" autocomplete="username"></div>
         <div class="field"><label>كلمة المرور</label><input id="a-pw" type="password" autocomplete="current-password"></div>
-        <button class="btn primary block" type="submit">تسجيل الدخول</button>`;
+        <button class="btn primary block" type="submit">تسجيل الدخول</button>
+        <button class="btn ghost block" type="button" id="forgot-pw" style="margin-top:6px;font-size:.85rem">🔑 نسيت كلمة المرور؟</button>`;
+      const fp = $('#forgot-pw', f);
+      if (fp) fp.onclick = () => modal('استعادة كلمة المرور', `
+        <p>كلمات المرور محفوظة <b>مشفّرة</b> ولا يمكن لأحد قراءتها — تُستعاد بتعيين كلمة جديدة:</p>
+        <div class="card" style="background:var(--panel-2);margin:10px 0"><b>🎒 للطلبة والمعلمين وأولياء الأمور:</b>
+          <p style="margin:.4em 0 0">تواصل مع <b>مدير النظام</b> ليعيّن لك كلمة مرور جديدة من صفحة «المستخدمون» (زر 🔑 أمام اسمك)، ثم سجّل الدخول بها وغيّرها من صفحة «حسابي».</p></div>
+        <div class="card" style="background:var(--panel-2)"><b>👑 للمدير نفسه:</b>
+          <p style="margin:.4em 0 0">غيّر كلمتك من صفحة «حسابي» وأنت مسجّل الدخول. إن فقدتها كليًا، يلزم الوصول إلى ملفات الخادم (ols-data) — تواصل مع مسؤول الاستضافة.</p></div>`,
+        `<button class="btn primary" onclick="this.closest('.modal-back').remove()">فهمت</button>`);
     } else {
       f.innerHTML = `<div class="field"><label>الاسم الكامل</label><input id="a-name" placeholder="${firstRun ? 'اسم المدير' : ''}"></div>
         <div class="field"><label>اسم المستخدم</label><input id="a-u" autocomplete="username"></div>
@@ -1168,6 +1218,17 @@ function showAuth(tab, inviteToken, flags) {
   };
 }
 function initials(name) { const p = String(name || '').trim().split(/\s+/); return (((p[0] || '')[0] || '') + ((p[1] || '')[0] || '')).toUpperCase() || '؟'; }
+/* red badge on the Users nav item with the number of pending sign-ups */
+async function updatePendingBadge() {
+  if (!Auth.isAdmin) return;
+  try {
+    const r = await api('/api/users');
+    const n = r.users.filter(u => u.status === 'pending').length;
+    let b = $('#nav-users .nav-badge');
+    if (!b) { b = document.createElement('span'); b.className = 'nav-badge'; $('#nav-users').appendChild(b); }
+    b.textContent = num(n); b.style.display = n ? '' : 'none';
+  } catch (e) {}
+}
 function renderUserMenu() {
   const el = $('#user-menu'); if (!el || !Auth.user) return;
   el.innerHTML = `<button class="um-btn" id="um-btn" aria-label="حسابي">
@@ -1193,6 +1254,7 @@ function onLoggedIn(token, user) {
   $('#foot-user').textContent = user.name; $('#foot-meta').textContent = Auth.role + ' · ' + APP_VERSION;
   renderUserMenu();
   loadDirectory();
+  updatePendingBadge();
   if (!location.hash || location.hash.indexOf('#/join') === 0) location.hash = '#/';
   Store.lastPull = 0; Store.pull(true).then(() => router()); Store.startPolling();
   router();
