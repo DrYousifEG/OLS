@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.4 · 2026-07-14';
+const APP_VERSION = 'v1.5 · 2026-07-14';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -209,6 +209,49 @@ function sendMessage(toU, toName, text) {
 }
 function roleEmoji(role) { return {'مدير': '👑', 'معلم': '📗', 'طالب': '🎒', 'ولي أمر': '👪', 'زائر': '👁️'}[role] || '👤'; }
 
+/* ---- class (grade) scoping ------------------------------------------------
+   Students see only the class(es) they are enrolled in; teachers their assigned
+   classes (all if unassigned); parents their child's class; admin everything.
+   grade 0 (روضة/عام) content is open to everyone. */
+function myLevels() {
+  if (!Auth.user) return [];
+  if (Auth.isParent) { const ch = DIRECTORY.find(u => u.u === (meDir().child || '')); return ch ? (ch.levels || []) : []; }
+  const d = meDir();
+  return (d.levels && d.levels.length ? d.levels : Auth.user.levels) || [];
+}
+function visibleTo(item) {
+  if (!Auth.user || Auth.isAdmin) return true;
+  const g = Number(item.grade) || 0;
+  if (g === 0) return true;
+  const lv = myLevels();
+  if (Auth.isTeacher) return lv.length ? lv.includes(g) : true;
+  if (Auth.isStudent || Auth.isParent) return lv.includes(g);
+  return true;   // visitor: read-only browsing
+}
+function forMe(items) { return (items || []).filter(visibleTo); }
+/* one banner for students not yet enrolled in a class */
+function noClassBanner() {
+  if (!(Auth.isStudent && myLevels().length === 0)) return '';
+  return `<div class="card" style="border-color:var(--gold);background:#fff9ec;margin-bottom:14px">
+    🎒 <b>لم يُعتمد صفّك الدراسي بعد.</b> يظهر لك حاليًا المحتوى العام فقط — بعد اعتماد المدير لصفّك سترى كل محتوى صفّك تلقائيًا.</div>`;
+}
+/* grade filter chips (per page, per device). Returns html; wire with wireGradeChips */
+function gradeFilterRow(pageKey, items) {
+  const grades = Array.from(new Set(items.map(i => Number(i.grade) || 0))).sort((a, b) => a - b);
+  if (grades.length < 2) return '';
+  const cur = Store.lget(pageKey + '-grade', 'all');
+  const chips = [{v: 'all', t: 'الكل'}].concat(grades.map(g => ({v: String(g), t: g === 0 ? 'عام / روضة' : gradeName(g)})));
+  return `<div class="chip-row">${chips.map(c => `<button class="tab-chip ${String(cur) === c.v ? 'active' : ''}" data-gf="${c.v}">${esc(c.t)}</button>`).join('')}</div>`;
+}
+function applyGradeFilter(pageKey, items) {
+  const cur = Store.lget(pageKey + '-grade', 'all');
+  if (cur === 'all') return items;
+  return items.filter(i => String(Number(i.grade) || 0) === String(cur));
+}
+function wireGradeChips(pageKey, rerender) {
+  $$('[data-gf]').forEach(c => c.onclick = () => { Store.lset(pageKey + '-grade', c.dataset.gf); rerender(); });
+}
+
 /* ============================== ROUTER ================================== */
 const PAGES = {};
 let currentRoute = '';
@@ -254,8 +297,8 @@ PAGES.dashboard = function () {
     <div class="section-title">🚀 وصول سريع</div>
     <div class="grid g-4">${quick.map(q => `<a class="card" href="#/${q.r}" style="cursor:pointer"><div style="font-size:2rem">${q.e}</div><h3 style="margin:.3em 0 .1em;color:var(--teal-ink)">${q.t}</h3><p class="muted" style="margin:0;font-size:.85rem">${q.d}</p></a>`).join('')}</div>
     <div class="grid g-2" style="margin-top:20px">
-      <div class="card"><div class="section-title" style="margin-top:0">🎓 المستويات الدراسية</div>
-        <div class="row">${DATA.levels.map(l => `<a class="pill ${l.kindergarten ? 'gold' : 'teal'}" href="#/${l.kindergarten ? 'kindergarten' : 'curriculum/' + l.id}" style="cursor:pointer">${esc(l.name)}</a>`).join('')}</div></div>
+      <div class="card"><div class="section-title" style="margin-top:0">🎓 ${Auth.isStudent ? 'صفّي الدراسي' : 'المستويات الدراسية'}</div>
+        <div class="row">${DATA.levels.filter(l => visibleTo({grade: l.grade})).map(l => `<a class="pill ${l.kindergarten ? 'gold' : 'teal'}" href="#/${l.kindergarten ? 'kindergarten' : 'curriculum/' + l.id}" style="cursor:pointer">${esc(l.name)}</a>`).join('')}</div></div>
       <div class="card"><div class="section-title" style="margin-top:0">🕘 أحدث النتائج</div>
         ${recent.length ? `<table class="tbl"><tr><th>الطالب</th><th>الاختبار</th><th>النتيجة</th><th>التاريخ</th></tr>
           ${recent.map(r => `<tr><td>${esc(r.userName || r.user)}</td><td>${esc(r.title)}</td><td><b>${num(r.score)}/${num(r.total)}</b></td><td class="muted">${num(arDate(r.date))}</td></tr>`).join('')}</table>`
@@ -269,20 +312,23 @@ PAGES.curriculum = function (params) {
   const levelId = params[0];
   if (!levelId) {
     crumb('المناهج', 'اختر المستوى الدراسي');
+    const myList = DATA.levels.filter(l => visibleTo({grade: l.grade}));
     $('#view').innerHTML = `
-      <div class="page-head"><div><h2>المناهج الدراسية</h2><p>المنهج العُماني — من الروضة إلى الصف الثاني عشر. اختر مستوى لعرض كتبه.</p></div></div>
-      <div class="grid g-4">${DATA.levels.map(l => {
+      <div class="page-head"><div><h2>المناهج الدراسية</h2><p>${Auth.isStudent ? 'كتب صفّك الدراسي' : 'المنهج العُماني — من الروضة إلى الصف الثاني عشر'}. اختر مستوى لعرض كتبه.</p></div></div>
+      ${noClassBanner()}
+      <div class="grid g-4">${myList.map(l => {
         const total = l.kindergarten ? 0 : l.books[1].length + l.books[2].length;
         return `<a class="card" href="#/${l.kindergarten ? 'kindergarten' : 'curriculum/' + l.id}" style="cursor:pointer;position:relative">
           <div style="font-size:1.9rem">${l.kindergarten ? '🧸' : '📖'}</div>
           <h3 style="margin:.3em 0 .1em;color:var(--teal-ink)">${esc(l.name)}</h3>
           <p class="muted" style="margin:0;font-size:.82rem">${esc(l.stage)}</p>
-          <div class="pill teal" style="margin-top:8px">${l.kindergarten ? 'أنشطة تفاعلية' : total + ' كتاب'}</div></a>`;
+          <div class="pill teal" style="margin-top:8px">${l.kindergarten ? 'أنشطة تفاعلية' : num(total) + ' كتاب'}</div></a>`;
       }).join('')}</div>`;
     return;
   }
   const level = DATA.levels.find(l => l.id === levelId);
   if (!level) { $('#view').innerHTML = `<div class="empty">المستوى غير موجود</div>`; return; }
+  if (!visibleTo({grade: level.grade})) { $('#view').innerHTML = `<div class="empty"><div class="big">🔒</div>هذا المستوى ليس ضمن صفّك الدراسي.<br><a class="btn" href="#/curriculum" style="margin-top:10px">◀ مناهج صفّي</a></div>`; return; }
   if (level.kindergarten) { go('kindergarten'); return; }
   crumb('المناهج · ' + level.name, level.stage);
   const colors = ['#0e7c66', '#2563eb', '#7c3aed', '#e11d64', '#d97706', '#0891b2', '#16a34a', '#be123c', '#4f46e5'];
@@ -332,16 +378,20 @@ function openBook(level, book, sem) {
 /* ---- Library ---- */
 PAGES.library = function () {
   crumb('المكتبة', 'الكتب والمصادر');
-  const items = library();
-  const subjects = ['الكل'].concat(Array.from(new Set(items.map(i => i.subject))));
+  const visible = forMe(library());
+  const byGrade = applyGradeFilter('library', visible);
+  const subjects = ['الكل'].concat(Array.from(new Set(byGrade.map(i => i.subject))));
   const activeSub = Store.lget('lib-sub', 'الكل');
-  const filtered = activeSub === 'الكل' ? items : items.filter(i => i.subject === activeSub);
+  const filtered = activeSub === 'الكل' ? byGrade : byGrade.filter(i => i.subject === activeSub);
   $('#view').innerHTML = `
-    <div class="page-head"><div><h2>🗂️ المكتبة</h2><p>كتب ومصادر تعليمية — تصفّح، افتح، أو نزّل.</p></div>
+    <div class="page-head"><div><h2>🗂️ المكتبة</h2><p>كتب ومصادر تعليمية مصنّفة حسب الصف — تصفّح، افتح، أو نزّل.</p></div>
       ${Auth.canManage ? `<button class="btn primary" id="add-book">➕ إضافة مصدر</button>` : ''}</div>
+    ${noClassBanner()}
+    ${gradeFilterRow('library', visible)}
     <div class="chip-row">${subjects.map(s => `<button class="tab-chip ${s === activeSub ? 'active' : ''}" data-sub="${esc(s)}">${esc(s)}</button>`).join('')}</div>
     <div class="lib-grid">${filtered.map(libCard).join('') || `<div class="empty"><div class="big">📚</div>لا توجد مصادر في هذا التصنيف.</div>`}</div>`;
-  $$('.tab-chip').forEach(c => c.onclick = () => { Store.lset('lib-sub', c.dataset.sub); PAGES.library(); });
+  wireGradeChips('library', PAGES.library);
+  $$('[data-sub]').forEach(c => c.onclick = () => { Store.lset('lib-sub', c.dataset.sub); PAGES.library(); });
   $$('[data-libopen]').forEach(b => b.onclick = () => libDetail(b.dataset.libopen));
   const add = $('#add-book'); if (add) add.onclick = addBookModal;
 };
@@ -435,41 +485,64 @@ function addBookModal() {
 
 /* ---- Lessons ---- */
 PAGES.lessons = function () {
-  crumb('الحصص', 'الدروس المسجّلة');
-  const items = lessons();
+  crumb('الحصص', 'الدروس والمواد التعليمية');
+  const visible = forMe(lessons()).sort((a, b) => (Number(a.grade) || 0) - (Number(b.grade) || 0));
+  const items = applyGradeFilter('lessons', visible);
   $('#view').innerHTML = `
-    <div class="page-head"><div><h2>🎬 الحصص</h2><p>دروس مسجّلة بالفيديو والصوت — للمشاهدة والاستماع والتنزيل.</p></div>
+    <div class="page-head"><div><h2>🎬 الحصص</h2><p>فيديو، صوت، ومستندات (PDF/Word/PowerPoint) — مصنّفة حسب الصف.</p></div>
       ${Auth.canManage ? `<button class="btn primary" id="add-lesson">➕ إضافة حصة</button>` : ''}</div>
-    <div class="lesson-grid">${items.map(lessonCard).join('') || `<div class="empty"><div class="big">🎬</div>لا توجد حصص بعد.</div>`}</div>`;
+    ${noClassBanner()}
+    ${gradeFilterRow('lessons', visible)}
+    <div class="lesson-grid">${items.map(lessonCard).join('') || `<div class="empty"><div class="big">🎬</div>لا توجد حصص في هذا الصف بعد.</div>`}</div>`;
+  wireGradeChips('lessons', PAGES.lessons);
   $$('[data-lesson]').forEach(c => c.onclick = () => openLesson(c.dataset.lesson));
   // NOTE: never pass the click event into addLessonModal — it would be mistaken
   // for an existing lesson and the new lesson would be saved without an id.
   const add = $('#add-lesson'); if (add) add.onclick = () => addLessonModal();
 };
+const lessonKind = l => l.type === 'audio' ? {icon: '🎧', label: 'صوت', bg: 'linear-gradient(135deg,#7c3aed,#a855f7)'}
+  : l.type === 'doc' ? {icon: '📄', label: l.ext || 'مستند', bg: 'linear-gradient(135deg,#0891b2,#2563eb)'}
+  : {icon: '▶', label: 'فيديو', bg: ''};
 function lessonCard(l) {
-  const icon = l.type === 'audio' ? '🎧' : '▶';
+  const k = lessonKind(l);
   return `<div class="lesson-card" data-lesson="${esc(l.id)}" style="cursor:pointer">
-    <div class="lesson-thumb" ${l.type === 'audio' ? 'style="background:linear-gradient(135deg,#7c3aed,#a855f7)"' : ''}>
-      <span class="badge">${l.type === 'audio' ? 'صوت' : 'فيديو'}</span>
-      <div class="play">${icon}</div>
+    <div class="lesson-thumb" ${k.bg ? `style="background:${k.bg}"` : ''}>
+      <span class="badge">${esc(k.label)}</span>
+      <div class="play">${k.icon}</div>
       ${l.duration ? `<span class="dur">${esc(l.duration)}</span>` : ''}</div>
     <div class="lc-body"><div class="lc-title">${esc(l.title)}</div>
-      <div class="lc-meta">${esc(l.subject || 'عام')} · ${l.grade ? gradeName(l.grade) : ''}</div></div></div>`;
+      <div class="lc-meta">${esc(l.subject || 'عام')} · ${l.grade ? gradeName(l.grade) : 'عام'}</div></div></div>`;
 }
 function openLesson(id) {
   const l = lessons().find(x => x.id === id); if (!l) return;
+  if (!visibleTo(l)) { toast('هذه الحصة لصفٍّ آخر.', 'err'); return; }
   let stage = '';
   const src = l.blobKey ? fileUrl(l.blobKey, l.title) : l.embed;
   const isEmbed = !l.blobKey && l.embed && /youtube|vimeo|drive\.google/.test(l.embed);
+  const ext = String(l.ext || '').toUpperCase();
   if (!src) stage = `<div class="media-stage audio" style="text-align:center;color:#fff">
       <div style="font-size:3rem">🎬</div><p>لم يُرفع محتوى لهذه الحصة بعد.</p>
-      ${Auth.canManage ? `<button class="btn gold" id="les-upload-cta">⬆ رفع فيديو / صوت الآن</button>` : `<p class="muted" style="color:#cfe9e2;font-size:.8rem">سيضيف المعلّم المحتوى قريبًا.</p>`}</div>`;
+      ${Auth.canManage ? `<button class="btn gold" id="les-upload-cta">⬆ رفع المحتوى الآن</button>` : `<p class="muted" style="color:#cfe9e2;font-size:.8rem">سيضيف المعلّم المحتوى قريبًا.</p>`}</div>`;
   else if (l.type === 'audio') stage = `<div class="media-stage audio"><div style="text-align:center;color:#fff;margin-bottom:12px;font-size:2.4rem">🎧</div><audio id="les-media" src="${esc(src)}" controls style="width:100%"></audio></div>`;
   else if (isEmbed) stage = `<div class="media-stage"><iframe id="les-media" src="${esc(embedUrl(l.embed))}" style="height:52vh" allowfullscreen frameborder="0"></iframe></div>`;
+  else if (l.type === 'doc') {
+    if (/^(PNG|JPG|JPEG|WEBP|GIF)$/.test(ext))
+      stage = `<img id="les-media" src="${esc(src)}" style="width:100%;max-height:58vh;object-fit:contain;border-radius:12px;background:#f3f6f5">`;
+    else if (ext === 'PDF')
+      stage = `<iframe id="les-media" src="${esc(src)}" style="width:100%;height:58vh;border:1px solid var(--line);border-radius:12px;background:#f3f6f5"></iframe>`;
+    else if (/^(DOC|DOCX|PPT|PPTX|XLS|XLSX)$/.test(ext)) {
+      // Office viewer renders Word/Excel and gives PowerPoint slide navigation;
+      // it needs the server to be publicly reachable (works on the live host)
+      const abs = location.origin + src;
+      stage = `<iframe id="les-media" src="https://view.officeapps.live.com/op/embed.aspx?src=${encodeURIComponent(abs)}" style="width:100%;height:58vh;border:1px solid var(--line);border-radius:12px;background:#f3f6f5" allowfullscreen></iframe>
+        <p class="muted" style="font-size:.76rem;margin:6px 0 0">${ext.indexOf('PPT') === 0 ? 'عرض الشرائح بأزرار التنقل داخل الإطار. ' : ''}العارض يعمل على الموقع المنشور؛ إن لم يظهر الملف استخدم زر التنزيل.</p>`;
+    } else stage = `<div class="media-stage audio" style="text-align:center;color:#fff"><div style="font-size:3rem">📄</div><p>ملف ${esc(ext || 'مستند')} — نزّله لعرضه.</p></div>`;
+  }
   else stage = `<div class="media-stage"><video id="les-media" src="${esc(src)}" controls playsinline preload="metadata" style="max-height:58vh"></video></div>`;
+  const typePill = l.type === 'audio' ? '🎧 صوت' : l.type === 'doc' ? '📄 ' + (ext || 'مستند') : '🎬 فيديو';
   const body = `${stage}
     <div style="margin-top:14px"><p>${esc(l.desc || '')}</p>
-    <div class="row"><span class="pill teal">${esc(l.subject || 'عام')}</span>${l.grade ? `<span class="pill">${gradeName(l.grade)}</span>` : ''}<span class="pill">${l.type === 'audio' ? '🎧 صوت' : '🎬 فيديو'}</span></div></div>`;
+    <div class="row"><span class="pill teal">${esc(l.subject || 'عام')}</span>${l.grade ? `<span class="pill">${gradeName(l.grade)}</span>` : ''}<span class="pill">${typePill}</span></div></div>`;
   const foot = `${(src && l.type !== 'audio') ? `<button class="btn" id="les-fs">⛶ ملء الشاشة</button>` : ''}
     ${l.blobKey ? `<a class="btn" href="${fileUrl(l.blobKey, l.title, true)}" download>⬇ تنزيل</a>` : ''}
     ${Auth.canManage ? `<button class="btn" id="les-replace">🔁 ${src ? 'استبدال المحتوى' : 'رفع المحتوى'}</button>` : ''}
@@ -499,15 +572,26 @@ function addLessonModal(existing) {
       <div class="field" style="flex:1"><label>المرحلة</label><select id="l-grade">${DATA.levels.map(l => `<option value="${l.grade}" ${e.grade === l.grade ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
     </div>
     <div class="field"><label>الوصف</label><textarea id="l-desc" rows="2">${esc(e.desc || '')}</textarea></div>
-    <div class="chip-row"><button class="tab-chip ${e.type !== 'audio' ? 'active' : ''}" data-t="video">🎬 فيديو</button><button class="tab-chip ${e.type === 'audio' ? 'active' : ''}" data-t="audio">🎧 صوت</button></div>
-    <div class="chip-row"><button class="tab-chip active" data-s="file">📎 رفع ملف</button><button class="tab-chip" data-s="embed">🔗 رابط (YouTube/Drive)</button></div>
-    <div class="field" id="l-file-f"><label>ملف الوسائط</label><input id="l-file" type="file" accept="video/*,audio/*"></div>
+    <div class="chip-row"><button class="tab-chip ${(e.type || 'video') === 'video' ? 'active' : ''}" data-t="video">🎬 فيديو</button><button class="tab-chip ${e.type === 'audio' ? 'active' : ''}" data-t="audio">🎧 صوت</button><button class="tab-chip ${e.type === 'doc' ? 'active' : ''}" data-t="doc">📄 مستند / عرض</button></div>
+    <div class="chip-row" id="l-src-row"><button class="tab-chip active" data-s="file">📎 رفع ملف</button><button class="tab-chip" data-s="embed">🔗 رابط (YouTube/Drive)</button></div>
+    <div class="field" id="l-file-f"><label>الملف</label><input id="l-file" type="file" accept="video/*">
+      <p class="muted" id="l-accept-hint" style="font-size:.72rem;margin:4px 0 0"></p></div>
     <div class="field" id="l-embed-f" hidden><label>الرابط</label><input id="l-embed" value="${esc(e.embed || '')}" placeholder="https://youtube.com/..."></div>`;
   const foot = `<button class="btn primary" id="l-save">${existing ? 'تحديث' : 'حفظ الحصة'}</button>`;
   const m = modal(existing ? 'استبدال / تعديل الحصة' : 'إضافة حصة', body, foot);
   let type = e.type || 'video', srcKind = 'file';
-  $$('[data-t]', m.el).forEach(b => b.onclick = () => { type = b.dataset.t; $$('[data-t]', m.el).forEach(x => x.classList.toggle('active', x === b)); });
+  const ACCEPT = {video: 'video/*', audio: 'audio/*', doc: '.pdf,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.png,.jpg,.jpeg,.webp'};
+  const HINT = {video: 'ملفات فيديو (MP4, WebM…) — الكبيرة يفضَّل رفعها كرابط YouTube/Drive', audio: 'ملفات صوت (MP3, WAV, M4A…)', doc: 'PDF · Word · PowerPoint · Excel · صور'};
+  const applyType = () => {
+    $('#l-file', m.el).setAttribute('accept', ACCEPT[type]);
+    $('#l-accept-hint', m.el).textContent = HINT[type];
+    const docMode = type === 'doc';
+    $('#l-src-row', m.el).hidden = docMode;                     // documents are always file uploads
+    if (docMode) { srcKind = 'file'; $('#l-file-f', m.el).hidden = false; $('#l-embed-f', m.el).hidden = true; }
+  };
+  $$('[data-t]', m.el).forEach(b => b.onclick = () => { type = b.dataset.t; $$('[data-t]', m.el).forEach(x => x.classList.toggle('active', x === b)); applyType(); });
   $$('[data-s]', m.el).forEach(b => b.onclick = () => { srcKind = b.dataset.s; $$('[data-s]', m.el).forEach(x => x.classList.toggle('active', x === b)); $('#l-file-f', m.el).hidden = srcKind !== 'file'; $('#l-embed-f', m.el).hidden = srcKind !== 'embed'; });
+  applyType();
   const saveBtn = $('#l-save', m.el);
   saveBtn.onclick = async () => {
     const title = $('#l-title', m.el).value.trim(); if (!title) return toast('أدخل العنوان', 'err');
@@ -529,6 +613,7 @@ function addLessonModal(existing) {
         try { await uploadBlob(key, dataUrl, p => label('جارٍ الرفع… ' + num(p) + '%')); }
         catch (er) { saveBtn.disabled = false; label(existing ? 'تحديث' : 'حفظ الحصة'); return toast('تعذّر الرفع — للفيديوهات الكبيرة استخدم رابط YouTube/Drive.', 'err'); }
         item.blobKey = key; item.embed = '';
+        item.ext = (f.name.split('.').pop() || '').toUpperCase(); item.mime = f.type || '';
       }
     }
     const c = Store.get('lessons', []);
@@ -545,15 +630,20 @@ function addLessonModal(existing) {
 /* ---- Exercises ---- */
 PAGES.exercises = function () {
   crumb('التمارين', 'رفع المهارات');
+  const visible = forMe(DATA.exercises);
+  const items = applyGradeFilter('exercises', visible);
   $('#view').innerHTML = `
-    <div class="page-head"><div><h2>✏️ التمارين</h2><p>تدرّب على المهارات الأساسية وارفع سرعتك ودقّتك.</p></div></div>
-    <div class="lesson-grid">${DATA.exercises.map(x => `
+    <div class="page-head"><div><h2>✏️ التمارين</h2><p>تدرّب على المهارات الأساسية — مصنّفة حسب الصف.</p></div></div>
+    ${noClassBanner()}
+    ${gradeFilterRow('exercises', visible)}
+    <div class="lesson-grid">${items.map(x => `
       <div class="card" style="cursor:pointer" data-ex="${esc(x.id)}">
         <div style="font-size:2rem">${x.kind.indexOf('math') === 0 ? '➗' : '🔤'}</div>
         <h3 style="margin:.3em 0 .1em;color:var(--teal-ink)">${esc(x.title)}</h3>
         <p class="muted" style="margin:0;font-size:.85rem">${esc(x.desc)}</p>
         <div class="row" style="margin-top:8px"><span class="pill teal">${esc(x.subject)}</span><span class="pill">${gradeName(x.grade)}</span><span class="pill gold">${esc(x.skill)}</span></div>
-      </div>`).join('')}</div>`;
+      </div>`).join('') || `<div class="empty"><div class="big">✏️</div>لا توجد تمارين في هذا الصف بعد.</div>`}</div>`;
+  wireGradeChips('exercises', PAGES.exercises);
   $$('[data-ex]').forEach(c => c.onclick = () => startDrill(c.dataset.ex));
 };
 function startDrill(id) {
@@ -629,17 +719,21 @@ function drillDone(ex, correct, total) {
 /* ---- Tests ---- */
 PAGES.tests = function () {
   crumb('الاختبارات', 'اختبارات تفاعلية');
-  const items = tests();
+  const visible = forMe(tests());
+  const items = applyGradeFilter('tests', visible);
   $('#view').innerHTML = `
-    <div class="page-head"><div><h2>📝 الاختبارات</h2><p>اختبارات تفاعلية تُجاب وتُصحّح فورًا مع تقرير مفصّل.</p></div>
+    <div class="page-head"><div><h2>📝 الاختبارات</h2><p>اختبارات تفاعلية مصنّفة حسب الصف — تُجاب وتُصحّح فورًا مع تقرير مفصّل.</p></div>
       ${Auth.canManage ? `<button class="btn primary" id="add-test">➕ إنشاء اختبار</button>` : ''}</div>
+    ${noClassBanner()}
+    ${gradeFilterRow('tests', visible)}
     <div class="grid g-3">${items.map(t => `
       <div class="card" style="cursor:pointer" data-test="${esc(t.id)}">
         <div style="font-size:2rem">🧠</div>
         <h3 style="margin:.3em 0 .1em;color:var(--teal-ink)">${esc(t.title)}</h3>
         <div class="row" style="margin:8px 0"><span class="pill teal">${esc(t.subject)}</span><span class="pill">${gradeName(t.grade)}</span></div>
-        <p class="muted" style="margin:0;font-size:.85rem">${t.questions.length} سؤال · ${t.minutes || 10} دقائق</p>
-      </div>`).join('') || `<div class="empty"><div class="big">📝</div>لا توجد اختبارات بعد.</div>`}</div>`;
+        <p class="muted" style="margin:0;font-size:.85rem">${num(t.questions.length)} سؤال · ${num(t.minutes || 10)} دقائق</p>
+      </div>`).join('') || `<div class="empty"><div class="big">📝</div>لا توجد اختبارات في هذا الصف بعد.</div>`}</div>`;
+  wireGradeChips('tests', PAGES.tests);
   $$('[data-test]').forEach(c => c.onclick = () => runTest(c.dataset.test));
   const add = $('#add-test'); if (add) add.onclick = addTestModal;
 };
@@ -1103,9 +1197,9 @@ function assignModal(u, act) {
 }
 function roleMatrixCard() {
   const caps = [
-    ['تصفّح المناهج والمكتبة', 1, 1, 1, 1, 1],
-    ['حضور الحصص وأداء التمارين', 1, 1, 1, 1, 0],
-    ['أداء الاختبارات التفاعلية', 1, 1, 1, 0, 0],
+    ['تصفّح المناهج والمكتبة', 1, 'صفوفه', 'صفّه', 'صف ابنه', 1],
+    ['حضور الحصص وأداء التمارين', 1, 'صفوفه', 'صفّه', 'صف ابنه', 0],
+    ['أداء الاختبارات التفاعلية', 1, 'صفوفه', 'صفّه', 0, 0],
     ['عرض النتائج', 'الكل', 'طلابه', 'نتائجه', 'ابنه', 0],
     ['رفع / إضافة محتوى (مكتبة، حصص)', 1, 1, 0, 0, 0],
     ['إنشاء اختبارات', 1, 1, 0, 0, 0],
@@ -1237,9 +1331,13 @@ function showAuth(tab, inviteToken, flags) {
       f.innerHTML = `<div class="field"><label>الاسم الكامل</label><input id="a-name" placeholder="${firstRun ? 'اسم المدير' : ''}"></div>
         <div class="field"><label>اسم المستخدم</label><input id="a-u" autocomplete="username"></div>
         <div class="field"><label>كلمة المرور</label><input id="a-pw" type="password" autocomplete="new-password"></div>
-        ${(inviteToken || firstRun) ? '' : `<div class="field"><label>الدور</label><select id="a-role"><option>طالب</option><option>معلم</option><option>ولي أمر</option></select></div>`}
+        ${(inviteToken || firstRun) ? '' : `<div class="field"><label>الدور</label><select id="a-role"><option>طالب</option><option>معلم</option><option>ولي أمر</option></select></div>
+        <div class="field" id="a-class-f"><label>الصف الدراسي المطلوب</label><select id="a-class">${DATA.levels.map(l => `<option value="${l.grade}">${esc(l.name)}</option>`).join('')}</select>
+          <p class="muted" style="font-size:.74rem;margin:4px 0 0">يعتمد المدير تسجيلك في هذا الصف قبل تفعيل حسابك.</p></div>`}
         <button class="btn primary block" type="submit">${firstRun ? '👑 إنشاء حساب المدير' : 'إنشاء الحساب'}</button>
-        <p class="muted" style="font-size:.78rem;text-align:center;margin-top:8px">${inviteToken ? 'انضمام عبر رابط دعوة' : firstRun ? '' : 'أول حساب يُسجَّل يصبح مدير النظام تلقائيًا.'}</p>`;
+        <p class="muted" style="font-size:.78rem;text-align:center;margin-top:8px">${inviteToken ? 'انضمام عبر رابط دعوة' : firstRun ? '' : 'يُفعَّل الحساب بعد موافقة مدير النظام.'}</p>`;
+      const roleSel = $('#a-role', f);
+      if (roleSel) { const tog = () => { $('#a-class-f', f).hidden = roleSel.value !== 'طالب'; }; roleSel.onchange = tog; tog(); }
     }
   };
   paint();
@@ -1252,9 +1350,14 @@ function showAuth(tab, inviteToken, flags) {
         onLoggedIn(r.token, r.user);
       } else {
         const payload = {u: $('#a-u').value, name: $('#a-name').value, pw: $('#a-pw').value};
-        if (inviteToken) payload.invite = inviteToken; else if (!firstRun) payload.role = $('#a-role').value;
+        if (inviteToken) payload.invite = inviteToken;
+        else if (!firstRun) {
+          payload.role = $('#a-role').value;
+          const cls = $('#a-class');
+          if (payload.role === 'طالب' && cls) payload.levels = [+cls.value];
+        }
         const r = await api('/api/register', 'POST', payload);
-        if (r.status === 'pending') { msg.className = 'auth-msg ok'; msg.innerHTML = '✅ تم إنشاء الحساب بنجاح.<br>حسابك الآن <b>بانتظار موافقة المدير</b> — بعد الموافقة يمكنك تسجيل الدخول.'; }
+        if (r.status === 'pending') { msg.className = 'auth-msg ok'; msg.innerHTML = '✅ تم إنشاء الحساب وإرسال طلب التسجيل.<br>حسابك الآن <b>بانتظار اعتماد المدير</b>' + (payload.levels ? ' لصفّك الدراسي' : '') + ' — بعد الموافقة يمكنك تسجيل الدخول.'; }
         else onLoggedIn(r.token, r.user);
       }
     } catch (e) {

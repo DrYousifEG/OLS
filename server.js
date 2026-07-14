@@ -22,7 +22,7 @@ const ROOT = __dirname;
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 /* must match APP_VERSION in app.js — check what's live at /api/version */
-const APP_VERSION = 'v1.4 · 2026-07-14';
+const APP_VERSION = 'v1.5 · 2026-07-14';
 const STARTED = new Date().toISOString();
 
 function pickDataDir() {
@@ -103,8 +103,11 @@ async function handleApi(req, res, urlPath, query) {
     if (db.users.some(x => x.u === u)) return json(res, 409, {error: 'اسم المستخدم موجود بالفعل.'});
     const first = db.users.length === 0;
     let role = ROLES.includes(body.role) ? body.role : 'طالب';
-    let scope = defScope(role), levels = [], status = 'pending';
-    if (first) { role = ADMIN_ROLE; scope = 'all'; status = 'active'; }
+    // requested class enrollment (e.g. student picks their grade) — recorded on
+    // the pending account so the admin sees and approves it
+    let levels = Array.isArray(body.levels) ? body.levels.map(Number).filter(n => Number.isInteger(n) && n >= 0 && n <= 12).slice(0, 13) : [];
+    let scope = defScope(role), status = 'pending';
+    if (first) { role = ADMIN_ROLE; scope = 'all'; status = 'active'; levels = []; }
     else if (body.invite) {
       const inv = db.invites.find(i => i.token === body.invite && !i.used && (!i.expires || i.expires > Date.now()));
       if (!inv) return json(res, 400, {error: 'رابط الدعوة غير صالح أو منتهي الصلاحية.'});
