@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.5 · 2026-07-14';
+const APP_VERSION = 'v1.6 · 2026-07-15';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -235,9 +235,11 @@ function noClassBanner() {
   return `<div class="card" style="border-color:var(--gold);background:#fff9ec;margin-bottom:14px">
     🎒 <b>لم يُعتمد صفّك الدراسي بعد.</b> يظهر لك حاليًا المحتوى العام فقط — بعد اعتماد المدير لصفّك سترى كل محتوى صفّك تلقائيًا.</div>`;
 }
-/* grade filter chips (per page, per device). Returns html; wire with wireGradeChips */
+/* grade filter chips (per page, per device). Returns html; wire with wireGradeChips.
+   Items may carry the grade as `.grade` (lessons/tests/exercises) or `.g` (books). */
+const gradeOf = i => Number(i.grade != null ? i.grade : i.g) || 0;
 function gradeFilterRow(pageKey, items) {
-  const grades = Array.from(new Set(items.map(i => Number(i.grade) || 0))).sort((a, b) => a - b);
+  const grades = Array.from(new Set(items.map(gradeOf))).sort((a, b) => a - b);
   if (grades.length < 2) return '';
   const cur = Store.lget(pageKey + '-grade', 'all');
   const chips = [{v: 'all', t: 'الكل'}].concat(grades.map(g => ({v: String(g), t: g === 0 ? 'عام / روضة' : gradeName(g)})));
@@ -246,10 +248,73 @@ function gradeFilterRow(pageKey, items) {
 function applyGradeFilter(pageKey, items) {
   const cur = Store.lget(pageKey + '-grade', 'all');
   if (cur === 'all') return items;
-  return items.filter(i => String(Number(i.grade) || 0) === String(cur));
+  // ignore a stale filter (e.g. left over from another user) whose grade isn't
+  // present in the current item set — otherwise the page would look empty
+  const avail = new Set(items.map(i => String(gradeOf(i))));
+  if (!avail.has(String(cur))) return items;
+  return items.filter(i => String(gradeOf(i)) === String(cur));
 }
 function wireGradeChips(pageKey, rerender) {
   $$('[data-gf]').forEach(c => c.onclick = () => { Store.lset(pageKey + '-grade', c.dataset.gf); rerender(); });
+}
+
+/* ---- official curriculum library (from library-data.js) ------------------
+   Every book has two forms: an official MoE interactive reader (b.link) and a
+   local PDF (b.file, served from a configurable base — default "library/").
+   The 18GB of PDFs are NOT bundled; the interactive links work everywhere. */
+const OFFICIAL_BOOKS = (window.OLS_LIBRARY && window.OLS_LIBRARY.books) || [];
+const SUBJECT_ICON = {
+  'اللغة العربية': '📕', 'اللغة الإنجليزية': '📘', 'الرياضيات': '➗', 'العلوم': '🔬',
+  'التربية الإسلامية': '🕌', 'الدراسات الاجتماعية': '🗺️', 'الفيزياء': '🧲', 'الكيمياء': '⚗️',
+  'الأحياء': '🧬', 'الجيولوجيا وعلوم البيئة': '🌋', 'تقنية المعلومات': '💻', 'الفنون التشكيلية': '🎨',
+  'الرياضة المدرسية': '⚽', 'المهارات الموسيقية': '🎵', 'المهارات الحياتية': '🌱',
+  'المهارات والمسار المهني': '🧭', 'أدلة أولياء الأمور': '👪', 'مصادر ومراجع': '📚', 'مصادر عامة': '📖'
+};
+const subjIcon = s => SUBJECT_ICON[s] || '📖';
+function pdfBase() { let b = Store.get('libPdfBase', 'library/'); return b && !/\/$/.test(b) ? b + '/' : b; }
+function encPath(p) { return String(p).split('/').map(encodeURIComponent).join('/'); }
+function bookHref(b, mode) {
+  const pdf = b.file ? pdfBase() + encPath(b.file) : '';
+  if (mode === 'pdf') return pdf || b.link || '';
+  return b.link || pdf || '';
+}
+function bookMode() { return Store.lget('book-mode', 'interactive'); }
+function officialFor(grade, sem) {
+  return OFFICIAL_BOOKS.filter(b => b.g === grade && (sem == null || b.sem === sem || b.sem === 0));
+}
+/* open a book inside the app (iframe reader) with PDF⇄interactive toggle */
+function openBookReader(b) {
+  let mode = bookMode();
+  if (mode === 'pdf' && !b.file) mode = 'interactive';
+  if (mode === 'interactive' && !b.link) mode = 'pdf';
+  const both = !!(b.file && b.link);
+  const shell = `
+    <div class="reader-bar" style="border-radius:12px 12px 0 0">
+      <div class="rt">${subjIcon(b.sub)} ${esc(b.title)}</div><div class="spacer"></div>
+      <span class="pill ${mode === 'pdf' ? 'gold' : 'teal'}" id="bk-modepill"></span>
+    </div>
+    <iframe id="bookframe" style="width:100%;height:66vh;border:1px solid var(--line);border-top:0;border-radius:0 0 12px 12px;background:#f3f6f5"></iframe>
+    <p class="muted" id="bk-note" style="font-size:.76rem;margin:8px 2px 0"></p>`;
+  const foot = `
+    ${both ? `<button class="btn" id="bk-toggle"></button>` : ''}
+    <button class="btn" id="bk-fs">⛶ ملء الشاشة</button>
+    <a class="btn primary" id="bk-open" target="_blank" rel="noopener">↗ فتح في نافذة</a>
+    ${b.file ? `<a class="btn" id="bk-dl" href="${bookHref(b, 'pdf')}" download>⬇ تنزيل PDF</a>` : ''}`;
+  const m = modal(gradeName(b.g) + (b.sem ? ' · الفصل ' + num(b.sem) : ''), shell, foot, {wide: true});
+  const apply = () => {
+    const url = bookHref(b, mode);
+    $('#bookframe', m.el).src = url;
+    $('#bk-open', m.el).href = url;
+    $('#bk-modepill', m.el).textContent = mode === 'pdf' ? '📄 ملف PDF' : '📖 كتاب تفاعلي';
+    $('#bk-modepill', m.el).className = 'pill ' + (mode === 'pdf' ? 'gold' : 'teal');
+    const tg = $('#bk-toggle', m.el); if (tg) tg.textContent = mode === 'interactive' ? '📄 عرض PDF' : '📖 عرض تفاعلي';
+    $('#bk-note', m.el).innerHTML = mode === 'pdf'
+      ? 'ملف PDF محلي — يظهر عند رفع مجلد المكتبة على الخادم. إن لم يظهر استخدم «الكتاب التفاعلي».'
+      : 'الكتاب التفاعلي الرسمي من بوابة وزارة التربية والتعليم.';
+  };
+  apply();
+  const tg = $('#bk-toggle', m.el); if (tg) tg.onclick = () => { mode = mode === 'interactive' ? 'pdf' : 'interactive'; Store.lset('book-mode', mode); apply(); };
+  $('#bk-fs', m.el).onclick = () => { const f = $('#bookframe', m.el); if (f.requestFullscreen) f.requestFullscreen(); else if (f.webkitRequestFullscreen) f.webkitRequestFullscreen(); };
 }
 
 /* ============================== ROUTER ================================== */
@@ -280,7 +345,7 @@ PAGES.dashboard = function () {
   const avg = myRes.length ? Math.round(myRes.reduce((s, r) => s + (r.score / r.total) * 100, 0) / myRes.length) : 0;
   const tiles = [
     {k: 'المستويات الدراسية', v: DATA.levels.length, s: 'من الروضة إلى الصف 12', cls: ''},
-    {k: 'الكتب والمصادر', v: library().length + DATA.levels.reduce((s, l) => s + l.books[1].length + l.books[2].length, 0), s: 'كتب رسمية ومكتبة', cls: 'b'},
+    {k: 'الكتب المدرسية', v: OFFICIAL_BOOKS.length + library().length, s: 'كتب رسمية ومصادر', cls: 'b'},
     {k: 'الحصص والدروس', v: lessons().length, s: 'فيديو وصوت', cls: 'p'},
     {k: 'متوسط أدائك', v: avg + '%', s: myRes.length + ' اختبار', cls: 'g'},
   ];
@@ -331,70 +396,142 @@ PAGES.curriculum = function (params) {
   if (!visibleTo({grade: level.grade})) { $('#view').innerHTML = `<div class="empty"><div class="big">🔒</div>هذا المستوى ليس ضمن صفّك الدراسي.<br><a class="btn" href="#/curriculum" style="margin-top:10px">◀ مناهج صفّي</a></div>`; return; }
   if (level.kindergarten) { go('kindergarten'); return; }
   crumb('المناهج · ' + level.name, level.stage);
-  const colors = ['#0e7c66', '#2563eb', '#7c3aed', '#e11d64', '#d97706', '#0891b2', '#16a34a', '#be123c', '#4f46e5'];
-  const rail = sem => level.books[sem].map((b, i) => `
-    <div class="book-chip" data-sem="${sem}" data-i="${i}">
-      <div class="book-spine" style="background:linear-gradient(135deg,${colors[i % colors.length]},${colors[(i + 3) % colors.length]})"></div>
-      <div><div class="bt">${esc(b.subject)}</div><div class="bs">فتح المصدر الرسمي ↗</div></div></div>`).join('');
+  const books = officialFor(level.grade, null);
+  // group by semester → subject
+  const spine = ['#0e7c66', '#2563eb', '#7c3aed', '#e11d64', '#d97706', '#0891b2', '#16a34a', '#be123c'];
+  const railSection = (sem, label) => {
+    const bs = books.filter(b => (sem === 0 ? b.sem === 0 : b.sem === sem));
+    if (!bs.length) return '';
+    const bySub = {};
+    bs.forEach(b => (bySub[b.sub] = bySub[b.sub] || []).push(b));
+    return `<div class="sem-label">${label}</div>` + Object.keys(bySub).map(sub => `
+      <div class="rail-sub">${subjIcon(sub)} ${esc(sub)}</div>` +
+      bySub[sub].map(b => { const gi = OFFICIAL_BOOKS.indexOf(b); const c = spine[Math.abs(hashStr(b.sub)) % spine.length];
+        return `<div class="book-chip" data-bi="${gi}">
+          <div class="book-spine" style="background:linear-gradient(135deg,${c},${spine[(spine.indexOf(c) + 3) % spine.length]})"></div>
+          <div><div class="bt">${esc(b.title.replace(/^[^—]+—\s*/, '') || b.sub)}</div>
+            <div class="bs">${b.link ? '📖 تفاعلي' : ''}${b.file ? (b.link ? ' · 📄 PDF' : '📄 PDF') : ''}</div></div></div>`;
+      }).join('')).join('');
+  };
   $('#view').innerHTML = `
-    <div class="page-head"><div><h2>📖 ${esc(level.name)}</h2><p>${esc(level.stage)} · اختر كتابًا من الرف لعرضه</p></div>
+    <div class="page-head"><div><h2>📖 ${esc(level.name)}</h2><p>${esc(level.stage)} · ${num(books.length)} كتاب — اختر كتابًا لعرضه هنا مباشرة</p></div>
       <a class="btn" href="#/curriculum">◀ كل المستويات</a></div>
     <div class="reader">
       <div class="reader-view" id="reader-view">
-        <div class="reader-empty"><div style="font-size:3rem">📚</div><h3>اختر كتابًا</h3>
-          <p>اضغط على أي كتاب في الرف لعرض مصدره الرسمي هنا مباشرة.</p></div>
+        <div class="reader-empty"><div style="font-size:3rem">📚</div><h3>اختر كتابًا من الرف</h3>
+          <p>يُفتح الكتاب مباشرة داخل الصفحة — تفاعلي أو PDF، مع ملء الشاشة.</p></div>
       </div>
       <div class="book-rail">
         <h4>📗 كتب ${esc(level.name)}</h4>
-        <div class="sem-label">الفصل الدراسي الأول</div>${rail(1)}
-        <div class="sem-label">الفصل الدراسي الثاني</div>${rail(2)}
+        ${railSection(1, 'الفصل الدراسي الأول')}
+        ${railSection(2, 'الفصل الدراسي الثاني')}
+        ${railSection(0, 'على مدار العام')}
       </div>
     </div>`;
   $$('.book-chip').forEach(chip => chip.onclick = () => {
     $$('.book-chip').forEach(c => c.classList.remove('active'));
     chip.classList.add('active');
-    const b = level.books[chip.dataset.sem][+chip.dataset.i];
-    openBook(level, b, chip.dataset.sem);
+    openBookInPane(OFFICIAL_BOOKS[+chip.dataset.bi]);
   });
 };
-function openBook(level, book, sem) {
-  const rv = $('#reader-view');
-  const semTxt = sem === '1' ? 'الفصل الأول' : 'الفصل الثاني';
-  rv.innerHTML = `
-    <div class="reader-bar">
-      <div class="rt">${esc(book.subject)} — ${esc(level.name)} · ${semTxt}</div>
-      <div class="spacer"></div>
-      <a class="btn sm primary" href="${esc(book.source)}" target="_blank" rel="noopener">فتح في نافذة جديدة ↗</a>
-    </div>
-    <div class="reader-empty">
-      <div style="font-size:3rem">📄</div>
-      <h3>${esc(book.subject)}</h3>
-      <p>هذا الكتاب مصدره رسمي من وزارة التربية والتعليم.<br>يُفتح في المصدر الرسمي للحفاظ على حقوق النشر.</p>
-      <p style="margin-top:14px"><a class="btn primary" href="${esc(book.source)}" target="_blank" rel="noopener">📖 افتح الكتاب الآن</a></p>
-      <p class="muted" style="font-size:.8rem;word-break:break-all;max-width:520px">${esc(book.source)}</p>
-    </div>`;
+function hashStr(s) { let h = 0; for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0; return h; }
+/* render the book inside the curriculum reader pane (not a modal) */
+function openBookInPane(b) {
+  if (!b) return;
+  const rv = $('#reader-view'); if (!rv) return;
+  let mode = bookMode();
+  if (mode === 'pdf' && !b.file) mode = 'interactive';
+  if (mode === 'interactive' && !b.link) mode = 'pdf';
+  const both = !!(b.file && b.link);
+  const draw = () => {
+    const url = bookHref(b, mode);
+    rv.innerHTML = `
+      <div class="reader-bar">
+        <div class="rt">${subjIcon(b.sub)} ${esc(b.title)}</div><div class="spacer"></div>
+        ${both ? `<button class="btn sm" id="rp-toggle">${mode === 'interactive' ? '📄 PDF' : '📖 تفاعلي'}</button>` : ''}
+        <button class="btn sm" id="rp-fs">⛶</button>
+        <a class="btn sm primary" href="${esc(url)}" target="_blank" rel="noopener">↗ نافذة</a>
+      </div>
+      <iframe class="reader-frame" id="rp-frame" src="${esc(url)}" allowfullscreen></iframe>`;
+    const tg = $('#rp-toggle', rv); if (tg) tg.onclick = () => { mode = mode === 'interactive' ? 'pdf' : 'interactive'; Store.lset('book-mode', mode); draw(); };
+    $('#rp-fs', rv).onclick = () => { const f = $('#rp-frame', rv); if (f.requestFullscreen) f.requestFullscreen(); else if (f.webkitRequestFullscreen) f.webkitRequestFullscreen(); };
+  };
+  draw();
 }
 
 /* ---- Library ---- */
 PAGES.library = function () {
-  crumb('المكتبة', 'الكتب والمصادر');
-  const visible = forMe(library());
-  const byGrade = applyGradeFilter('library', visible);
-  const subjects = ['الكل'].concat(Array.from(new Set(byGrade.map(i => i.subject))));
+  crumb('المكتبة', 'الكتب المدرسية والمصادر');
+  // official curriculum books visible to this user, filtered by grade chip
+  const official = OFFICIAL_BOOKS.filter(b => visibleTo({grade: b.g}));
+  const byGrade = applyGradeFilter('library', official);
+  const q = (Store.lget('lib-q', '') || '').trim();
   const activeSub = Store.lget('lib-sub', 'الكل');
-  const filtered = activeSub === 'الكل' ? byGrade : byGrade.filter(i => i.subject === activeSub);
+  const activeSem = Store.lget('lib-sem', 'all');
+  const mode = bookMode();
+  let list = byGrade;
+  if (activeSem !== 'all') list = list.filter(b => String(b.sem) === activeSem);
+  if (activeSub !== 'الكل') list = list.filter(b => b.sub === activeSub);
+  if (q) list = list.filter(b => (b.title + ' ' + b.sub + ' ' + b.name + ' ' + gradeName(b.g)).toLowerCase().includes(q.toLowerCase()));
+  const subjects = ['الكل'].concat(Array.from(new Set(byGrade.map(b => b.sub))));
+  // group results by subject
+  const bySub = {}; list.forEach(b => (bySub[b.sub] = bySub[b.sub] || []).push(b));
+  const custom = forMe(library());
   $('#view').innerHTML = `
-    <div class="page-head"><div><h2>🗂️ المكتبة</h2><p>كتب ومصادر تعليمية مصنّفة حسب الصف — تصفّح، افتح، أو نزّل.</p></div>
-      ${Auth.canManage ? `<button class="btn primary" id="add-book">➕ إضافة مصدر</button>` : ''}</div>
+    <div class="page-head"><div><h2>🗂️ المكتبة</h2><p>${num(OFFICIAL_BOOKS.length)} كتابًا مدرسيًا رسميًا — مصنّفة حسب الصف والمادة، بصيغة تفاعلية أو PDF.</p></div>
+      <div class="row">
+        <div class="seg"><button class="seg-btn ${mode === 'interactive' ? 'on' : ''}" data-mode="interactive">📖 تفاعلي</button><button class="seg-btn ${mode === 'pdf' ? 'on' : ''}" data-mode="pdf">📄 PDF</button></div>
+        ${Auth.canManage ? `<button class="btn primary" id="add-book">➕ مصدر</button>` : ''}
+      </div></div>
     ${noClassBanner()}
-    ${gradeFilterRow('library', visible)}
-    <div class="chip-row">${subjects.map(s => `<button class="tab-chip ${s === activeSub ? 'active' : ''}" data-sub="${esc(s)}">${esc(s)}</button>`).join('')}</div>
-    <div class="lib-grid">${filtered.map(libCard).join('') || `<div class="empty"><div class="big">📚</div>لا توجد مصادر في هذا التصنيف.</div>`}</div>`;
+    <div class="row" style="gap:10px;margin-bottom:12px">
+      <input id="lib-search" placeholder="🔎 ابحث عن كتاب أو مادة…" value="${esc(q)}" style="flex:1;min-width:180px;padding:.6em .9em;border:1px solid var(--line);border-radius:12px">
+      ${Auth.isAdmin ? `<button class="btn" id="lib-cfg" title="مسار ملفات PDF على الخادم">⚙️ مسار PDF</button>` : ''}
+    </div>
+    ${gradeFilterRow('library', official)}
+    <div class="chip-row">
+      <button class="tab-chip ${activeSem === 'all' ? 'active' : ''}" data-sem="all">كل الفصول</button>
+      <button class="tab-chip ${activeSem === '1' ? 'active' : ''}" data-sem="1">الفصل الأول</button>
+      <button class="tab-chip ${activeSem === '2' ? 'active' : ''}" data-sem="2">الفصل الثاني</button>
+      <button class="tab-chip ${activeSem === '0' ? 'active' : ''}" data-sem="0">على مدار العام</button>
+    </div>
+    <div class="chip-row">${subjects.map(s => `<button class="tab-chip ${s === activeSub ? 'active' : ''}" data-sub="${esc(s)}">${s === 'الكل' ? 'كل المواد' : subjIcon(s) + ' ' + esc(s)}</button>`).join('')}</div>
+    ${Object.keys(bySub).length ? Object.keys(bySub).map(sub => `
+      <div class="section-title">${subjIcon(sub)} ${esc(sub)} <span class="muted" style="font-weight:400;font-size:.8rem">(${num(bySub[sub].length)})</span></div>
+      <div class="lib-grid">${bySub[sub].map(officialCard).join('')}</div>`).join('')
+      : `<div class="empty"><div class="big">🔍</div>لا توجد كتب مطابقة.</div>`}
+    ${custom.length ? `<div class="section-title" style="margin-top:26px">📎 مصادر ومرفقات إضافية</div><div class="lib-grid">${custom.map(libCard).join('')}</div>` : ''}`;
+  $$('[data-mode]').forEach(b => b.onclick = () => { Store.lset('book-mode', b.dataset.mode); PAGES.library(); });
   wireGradeChips('library', PAGES.library);
+  $$('[data-sem]').forEach(c => c.onclick = () => { Store.lset('lib-sem', c.dataset.sem); PAGES.library(); });
   $$('[data-sub]').forEach(c => c.onclick = () => { Store.lset('lib-sub', c.dataset.sub); PAGES.library(); });
+  $$('[data-bopen]').forEach(b => b.onclick = () => openBookReader(OFFICIAL_BOOKS[+b.dataset.bopen]));
   $$('[data-libopen]').forEach(b => b.onclick = () => libDetail(b.dataset.libopen));
+  const sIn = $('#lib-search');
+  let st; sIn.oninput = () => { clearTimeout(st); st = setTimeout(() => { const p = sIn.selectionStart; Store.lset('lib-q', sIn.value); PAGES.library(); const n = $('#lib-search'); if (n) { n.focus(); n.setSelectionRange(p, p); } }, 300); };
   const add = $('#add-book'); if (add) add.onclick = addBookModal;
+  const cfg = $('#lib-cfg'); if (cfg) cfg.onclick = pdfBaseModal;
 };
+function officialCard(b) {
+  const gi = OFFICIAL_BOOKS.indexOf(b);
+  const c = ['#0e7c66', '#2563eb', '#7c3aed', '#e11d64', '#d97706', '#0891b2', '#16a34a', '#be123c'][Math.abs(hashStr(b.sub)) % 8];
+  const badges = (b.link ? '<span class="ext" style="inset-inline-end:8px;inset-inline-start:auto">تفاعلي</span>' : '') + (b.file ? '<span class="ext">PDF</span>' : '');
+  return `<div class="book-card" data-bopen="${gi}" style="cursor:pointer">
+    <div class="book-cover" style="background:linear-gradient(135deg,${c},${c}bb)">
+      <div>${subjIcon(b.sub)}<br>${esc(b.sub)}</div>${badges}</div>
+    <div class="bc-body">
+      <div class="bc-title">${esc(b.title.replace(/^[^—]+—\s*/, '') || b.sub)}</div>
+      <div class="bc-meta">${esc(gradeName(b.g))}${b.sem ? ' · الفصل ' + num(b.sem) : ''}</div>
+    </div>
+    <div class="bc-actions"><button class="btn sm primary" style="flex:1">📖 قراءة</button></div></div>`;
+}
+function pdfBaseModal() {
+  const body = `<p class="muted">لتشغيل خيار «PDF» يجب رفع مجلد المكتبة إلى الخادم، ثم تحديد مساره هنا (نسبي مثل <code>library/</code> أو رابط كامل لخادم/تخزين خارجي).</p>
+    <div class="field"><label>مسار ملفات PDF (Base URL)</label><input id="pb" value="${esc(Store.get('libPdfBase', 'library/'))}" placeholder="library/"></div>
+    <p class="muted" style="font-size:.78rem">مثال المسار الكامل لكتاب: <code>&lt;base&gt;/1. الصف الاول/1.1 .../اسم الملف.pdf</code>. الكتب التفاعلية (الروابط) تعمل دائمًا دون هذا الإعداد.</p>`;
+  const m = modal('إعداد مسار ملفات PDF', body, `<button class="btn primary" id="pb-save">حفظ</button>`);
+  $('#pb-save', m.el).onclick = () => { Store.set('libPdfBase', $('#pb', m.el).value.trim()); m.close(); toast('تم الحفظ', 'ok'); PAGES.library(); };
+}
 function libCard(i) {
   const isUpload = i.kind === 'file';
   return `<div class="book-card">
@@ -1396,7 +1533,13 @@ function renderUserMenu() {
   $$('#um-drop a', el).forEach(a => a.onclick = () => drop.classList.remove('show'));
   if (!renderUserMenu._wired) { document.addEventListener('click', () => { const d = $('#um-drop'); if (d) d.classList.remove('show'); }); renderUserMenu._wired = true; }
 }
+/* per-device UI filters must not leak between users on a shared device */
+function resetFilters() {
+  ['lib-q', 'lib-sub', 'lib-sem', 'library-grade', 'lessons-grade', 'tests-grade', 'exercises-grade', 'msg-active']
+    .forEach(k => { try { localStorage.removeItem(LOCAL_PREFIX + k); } catch (e) {} });
+}
 function onLoggedIn(token, user) {
+  resetFilters();
   Store.token = token; Store.set('token', token); Auth.user = user;
   $('#auth-screen').classList.remove('show'); $('#app-shell').hidden = false;
   $('#nav-users').style.display = Auth.isAdmin ? '' : 'none';

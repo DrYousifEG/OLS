@@ -22,7 +22,7 @@ const ROOT = __dirname;
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 /* must match APP_VERSION in app.js — check what's live at /api/version */
-const APP_VERSION = 'v1.5 · 2026-07-14';
+const APP_VERSION = 'v1.6 · 2026-07-15';
 const STARTED = new Date().toISOString();
 
 function pickDataDir() {
