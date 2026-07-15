@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.6 · 2026-07-15';
+const APP_VERSION = 'v1.7 · 2026-07-15';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -1189,21 +1189,105 @@ function renderMessages(activeU) {
 };
 
 /* ---- Kindergarten ---- */
+/* speak Arabic text aloud (tap-to-hear). Uses the browser voices; degrades
+   silently if no Arabic voice is installed. */
+let _voicesReady = false;
+function primeVoices() { try { if ('speechSynthesis' in window) { speechSynthesis.getVoices(); speechSynthesis.onvoiceschanged = () => { _voicesReady = true; }; } } catch (e) {} }
+function speak(text) {
+  try {
+    if (!('speechSynthesis' in window)) return;
+    speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(String(text));
+    u.lang = 'ar-SA'; u.rate = 0.82; u.pitch = 1.05;
+    const ar = speechSynthesis.getVoices().find(v => /^ar/i.test(v.lang));
+    if (ar) u.voice = ar;
+    speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+/* ---- Kindergarten learning decks (all self-contained & interactive) ---- */
+const KG_DECKS = {
+  letters: {title: 'الحروف العربية', icon: '🔤', color: '#38b2ac', items: [
+    ['أ', 'أَسَد', '🦁'], ['ب', 'بَطَّة', '🦆'], ['ت', 'تُفّاحة', '🍎'], ['ث', 'ثَعلَب', '🦊'], ['ج', 'جَمَل', '🐫'],
+    ['ح', 'حِصان', '🐴'], ['خ', 'خَروف', '🐑'], ['د', 'دَجاجة', '🐔'], ['ذ', 'ذُرة', '🌽'], ['ر', 'رِيشة', '🪶'],
+    ['ز', 'زَرافة', '🦒'], ['س', 'سَمَكة', '🐟'], ['ش', 'شَمس', '☀️'], ['ص', 'صَقر', '🦅'], ['ض', 'ضِفدَع', '🐸'],
+    ['ط', 'طائِرة', '✈️'], ['ظ', 'ظَرف', '✉️'], ['ع', 'عِنَب', '🍇'], ['غ', 'غَزال', '🦌'], ['ف', 'فيل', '🐘'],
+    ['ق', 'قِطّة', '🐱'], ['ك', 'كِتاب', '📖'], ['ل', 'لَيمون', '🍋'], ['م', 'مَوز', '🍌'], ['ن', 'نَحلة', '🐝'],
+    ['ه', 'هُدهُد', '🐦'], ['و', 'وَردة', '🌹'], ['ي', 'يَد', '✋']]},
+  numbers: {title: 'الأرقام ١–١٠', icon: '🔢', color: '#ff6f91', items: [
+    ['١', 'واحِد', '🍎'], ['٢', 'اِثنان', '🍎🍎'], ['٣', 'ثَلاثة', '⭐⭐⭐'], ['٤', 'أَربَعة', '🎈🎈🎈🎈'],
+    ['٥', 'خَمسة', '🐤🐤🐤🐤🐤'], ['٦', 'سِتّة', '🌸🌸🌸🌸🌸🌸'], ['٧', 'سَبعة', '🐟×٧'], ['٨', 'ثَمانية', '🍇×٨'],
+    ['٩', 'تِسعة', '🌟×٩'], ['١٠', 'عَشَرة', '🖐️🖐️']]},
+  colors: {title: 'الألوان', icon: '🎨', color: '#f9a826', items: [
+    ['', 'أَحمَر', '', '#e11d48'], ['', 'أَزرَق', '', '#2563eb'], ['', 'أَخضَر', '', '#16a34a'], ['', 'أَصفَر', '', '#f59e0b'],
+    ['', 'بُرتُقالي', '', '#f97316'], ['', 'بَنَفسَجي', '', '#7c3aed'], ['', 'وَردي', '', '#ec4899'], ['', 'بُنّي', '', '#92400e'],
+    ['', 'أَبيَض', '', '#f4f4f5'], ['', 'أَسوَد', '', '#18181b']]},
+  shapes: {title: 'الأشكال', icon: '🔷', color: '#7b8cff', items: [
+    ['●', 'دائِرة', ''], ['■', 'مُرَبَّع', ''], ['▲', 'مُثَلَّث', ''], ['★', 'نَجمة', ''], ['❤', 'قَلب', ''], ['▬', 'مُستَطيل', '']]},
+  fruits: {title: 'فواكه وخضار', icon: '🍎', color: '#ef476f', items: [
+    ['', 'تُفّاحة', '🍎'], ['', 'مَوز', '🍌'], ['', 'بُرتُقال', '🍊'], ['', 'عِنَب', '🍇'], ['', 'فَراولة', '🍓'],
+    ['', 'بَطّيخ', '🍉'], ['', 'تَمر', '🌴'], ['', 'جَزَر', '🥕'], ['', 'طَماطِم', '🍅'], ['', 'لَيمون', '🍋']]},
+  animals: {title: 'الحيوانات', icon: '🐘', color: '#06d6a0', items: [
+    ['', 'أَسَد', '🦁'], ['', 'فيل', '🐘'], ['', 'جَمَل', '🐫'], ['', 'قِطّة', '🐱'], ['', 'كَلب', '🐶'], ['', 'حِصان', '🐴'],
+    ['', 'خَروف', '🐑'], ['', 'دَجاجة', '🐔'], ['', 'سَمَكة', '🐟'], ['', 'عُصفور', '🐦'], ['', 'نَحلة', '🐝'], ['', 'أَرنَب', '🐰']]},
+  oman: {title: 'عُمان بَلَدي', icon: '🇴🇲', color: '#c1121f', items: [
+    ['', 'عَلَم عُمان', '🇴🇲'], ['', 'الجَمَل', '🐫'], ['', 'النَّخلة والتَّمر', '🌴'], ['', 'الخَنجَر العُماني', '🗡️'],
+    ['', 'القَلعة', '🏰'], ['', 'المَسجِد', '🕌'], ['', 'البَحر', '🌊'], ['', 'الجَبَل', '⛰️'], ['', 'القَهوة العُمانية', '☕'], ['', 'الماعِز', '🐐']]},
+  adab: {title: 'آداب وكَلِمات', icon: '🌟', color: '#118ab2', items: [
+    ['', 'السَّلامُ عَلَيكُم', '👋'], ['', 'بِسمِ الله', '🤲'], ['', 'الحَمدُ لله', '💚'], ['', 'شُكراً', '🙏'],
+    ['', 'مِن فَضلِك', '😊'], ['', 'آسِف', '🤝'], ['', 'أُحِبُّ أُمّي', '💗'], ['', 'أُحِبُّ عُمان', '❤️']]},
+};
+
 PAGES.kindergarten = function () {
-  crumb('الروضة', 'أنشطة تفاعلية');
+  crumb('الروضة', 'تعلّم والعب');
+  const deckTile = (k) => { const d = KG_DECKS[k]; return `<button class="kg-tile" style="background:linear-gradient(135deg,${d.color},${d.color}cc)" data-deck="${k}"><span class="emo">${d.icon}</span>${esc(d.title)}</button>`; };
+  const gameTile = (k, icon, label, col) => `<button class="kg-tile" style="background:linear-gradient(135deg,${col})" data-kg="${k}"><span class="emo">${icon}</span>${label}</button>`;
   $('#view').innerHTML = `<div class="kg">
-    <div class="page-head"><div><h2>🧸 ركن الروضة</h2><p>ألعاب وأنشطة تفاعلية ممتعة للأطفال دون الصف الأول.</p></div>
+    <div class="page-head"><div><h2>🧸 ركن الروضة</h2><p>تعلّم الحروف والأرقام والألوان — اضغط على أي بطاقة لتسمع الكلمة! 🔊</p></div>
       <a class="btn" href="#/">◀ الرئيسية</a></div>
+    <div class="section-title">📚 تعلّم — بطاقات ناطقة</div>
     <div class="kg-grid">
-      <button class="kg-tile" style="background:linear-gradient(135deg,#ff6f91,#ff9671)" data-kg="count"><span class="emo">🔢</span>عدّ الأشياء</button>
-      <button class="kg-tile" style="background:linear-gradient(135deg,#5ad2c9,#38b2ac)" data-kg="letters"><span class="emo">🔤</span>الحروف</button>
-      <button class="kg-tile" style="background:linear-gradient(135deg,#ffc75f,#f9a826)" data-kg="colors"><span class="emo">🎨</span>الألوان</button>
-      <button class="kg-tile" style="background:linear-gradient(135deg,#7b8cff,#9b5de5)" data-kg="shapes"><span class="emo">🔷</span>الأشكال</button>
-      <button class="kg-tile" style="background:linear-gradient(135deg,#43cea2,#5ad2c9)" data-kg="animals"><span class="emo">🐘</span>الحيوانات</button>
-      <button class="kg-tile" style="background:linear-gradient(135deg,#ff9a9e,#fecfef)" data-kg="count"><span class="emo">🎯</span>العدّ من جديد</button>
+      ${deckTile('letters')}${deckTile('numbers')}${deckTile('colors')}${deckTile('shapes')}
+      ${deckTile('fruits')}${deckTile('animals')}${deckTile('oman')}${deckTile('adab')}
+    </div>
+    <div class="section-title">🎮 العب — أسئلة ممتعة</div>
+    <div class="kg-grid">
+      ${gameTile('count', '🔢', 'عدّ الأشياء', '#ff6f91,#ff9671')}
+      ${gameTile('letters', '🔤', 'اعرف الحرف', '#5ad2c9,#38b2ac')}
+      ${gameTile('colors', '🎨', 'اعرف اللون', '#ffc75f,#f9a826')}
+      ${gameTile('shapes', '🔷', 'اعرف الشكل', '#7b8cff,#9b5de5')}
+      ${gameTile('animals', '🐘', 'اعرف الحيوان', '#43cea2,#5ad2c9')}
+      ${gameTile('fruits', '🍎', 'اعرف الفاكهة', '#ff6f91,#ffa8a8')}
     </div></div>`;
+  $$('[data-deck]').forEach(b => b.onclick = () => kgDeck(b.dataset.deck));
   $$('[data-kg]').forEach(b => b.onclick = () => kgGame(b.dataset.kg));
 };
+/* flashcard viewer: big visual + Arabic word + tap-to-hear + prev/next */
+function kgDeck(key) {
+  const deck = KG_DECKS[key]; let i = 0;
+  const m = modal(deck.icon + ' ' + deck.title, `<div id="kg-deck"></div>`, '', {wide: true});
+  const render = (autoSpeak) => {
+    const it = deck.items[i]; const [big, word, emo, bg] = it;
+    const visual = bg ? `<div style="width:150px;height:150px;border-radius:32px;background:${bg};margin:6px auto;box-shadow:var(--shadow);border:${bg === '#f4f4f5' ? '2px solid var(--line)' : '0'}"></div>`
+      : big ? `<div class="kg-big" style="margin:4px 0">${big}</div>${emo ? `<div style="font-size:2.4rem">${emo}</div>` : ''}`
+      : `<div style="font-size:6rem;line-height:1.1">${emo}</div>`;
+    $('#kg-deck', m.el).innerHTML = `<div class="kg-play" style="user-select:none">
+      <div class="muted">${num(i + 1)} / ${num(deck.items.length)}</div>
+      ${visual}
+      <h1 class="kg-word" style="font-size:2.6rem;color:#d6336c;margin:.2em 0">${esc(word)}</h1>
+      <button class="btn gold" id="kg-say" style="font-size:1.1rem">🔊 استمع</button>
+      <div class="kg-choices" style="margin-top:16px">
+        <button class="kg-choice" id="kg-prev" style="background:#94a3b8">◀</button>
+        <button class="kg-choice" id="kg-next" style="background:linear-gradient(135deg,${deck.color},${deck.color}cc)">▶</button>
+      </div></div>`;
+    const say = () => speak(big && key === 'letters' ? (big + ' . ' + word) : word);
+    $('#kg-say', m.el).onclick = say;
+    $('#kg-prev', m.el).onclick = () => { i = (i - 1 + deck.items.length) % deck.items.length; render(true); };
+    $('#kg-next', m.el).onclick = () => { i = (i + 1) % deck.items.length; render(true); };
+    if (autoSpeak) say();
+  };
+  render(false);
+}
 function kgGame(kind) {
   const games = {
     count: () => { const n = 1 + Math.floor(Math.random() * 5); const emo = ['🍎', '⭐', '🎈', '🐤', '🌸'][Math.floor(Math.random() * 5)];
@@ -1217,9 +1301,12 @@ function kgGame(kind) {
     shapes: () => { const sh = [['دائرة', '●'], ['مربع', '■'], ['مثلث', '▲'], ['نجمة', '★'], ['قلب', '❤']];
       const pick = sh[Math.floor(Math.random() * sh.length)]; const opts = shuffle([pick].concat(shuffle(sh.filter(s => s !== pick)).slice(0, 2)));
       return {prompt: 'ما اسم هذا الشكل؟', display: `<span style="font-size:6rem;color:#7b8cff">${pick[1]}</span>`, answer: pick[0], choices: opts.map(s => s[0]), color: '#7b8cff'}; },
-    animals: () => { const an = [['فيل', '🐘'], ['قطة', '🐱'], ['أسد', '🦁'], ['أرنب', '🐰'], ['بطة', '🦆'], ['سمكة', '🐟']];
+    animals: () => { const an = [['فيل', '🐘'], ['قطة', '🐱'], ['أسد', '🦁'], ['أرنب', '🐰'], ['بطة', '🦆'], ['سمكة', '🐟'], ['جمل', '🐫']];
       const pick = an[Math.floor(Math.random() * an.length)]; const opts = shuffle([pick].concat(shuffle(an.filter(a => a !== pick)).slice(0, 2)));
       return {prompt: 'ما اسم هذا الحيوان؟', display: `<span style="font-size:6rem">${pick[1]}</span>`, answer: pick[0], choices: opts.map(a => a[0]), color: '#43cea2'}; },
+    fruits: () => { const fr = [['تفاحة', '🍎'], ['موز', '🍌'], ['برتقال', '🍊'], ['عنب', '🍇'], ['فراولة', '🍓'], ['بطيخ', '🍉'], ['تمر', '🌴']];
+      const pick = fr[Math.floor(Math.random() * fr.length)]; const opts = shuffle([pick].concat(shuffle(fr.filter(a => a !== pick)).slice(0, 2)));
+      return {prompt: 'ما اسم هذه الفاكهة؟', display: `<span style="font-size:6rem">${pick[1]}</span>`, answer: pick[0], choices: opts.map(a => a[0]), color: '#ff6f91'}; },
   };
   let score = 0, round = 0; const rounds = 6;
   const palette = ['#ff6f91', '#5ad2c9', '#ffc75f', '#7b8cff', '#43cea2', '#f97316'];
@@ -1235,6 +1322,7 @@ function kgGame(kind) {
     $$('.kg-choice', m.el).forEach(btn => btn.onclick = () => {
       const ok = btn.dataset.c === g.answer;
       if (ok) score++;
+      speak(ok ? 'أحسنت! ' + g.answer : g.answer);
       $$('.kg-choice', m.el).forEach(b => b.disabled = true);
       // full-screen result inside the modal — always visible on phones before advancing
       const box = $('.kg-play', m.el);
@@ -1560,6 +1648,7 @@ async function logout() {
 
 /* ------------------------------ boot ------------------------------------ */
 async function boot() {
+  primeVoices();
   NUM_MODE = Store.lget('num-mode', 'hindi');
   updateNumToggle();
   const nt = $('#num-toggle'); if (nt) nt.onclick = toggleNum;
