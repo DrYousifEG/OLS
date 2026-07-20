@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.7 · 2026-07-15';
+const APP_VERSION = 'v1.8 · 2026-07-15';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -772,6 +772,15 @@ PAGES.exercises = function () {
   $('#view').innerHTML = `
     <div class="page-head"><div><h2>✏️ التمارين</h2><p>تدرّب على المهارات الأساسية — مصنّفة حسب الصف.</p></div></div>
     ${noClassBanner()}
+    <div class="board-hero">
+      <div>
+        <h3>🎨 لوحة التدريب والكتابة (A4)</h3>
+        <p>ورقة A4 قابلة للكتابة والرسم والتلوين، بقوالب مسطّرة (عربي، إنجليزي، رياضيات…) وأداة
+        <b>تتبّع الحروف والكلمات المنقّطة</b> — يكتب المعلّم النص فيتحوّل إلى نموذج منقّط يتتبّعه الطفل.</p>
+      </div>
+      <a class="btn gold" href="#/board">افتح اللوحة ✍️</a>
+    </div>
+    <div class="section-title">🧠 تمارين تفاعلية</div>
     ${gradeFilterRow('exercises', visible)}
     <div class="lesson-grid">${items.map(x => `
       <div class="card" style="cursor:pointer" data-ex="${esc(x.id)}">
@@ -852,6 +861,123 @@ function drillDone(ex, correct, total) {
     <h2 style="color:var(--teal-ink)">${num(correct)} / ${num(total)}</h2>
     <p class="muted">نسبة النجاح ${num(pct)}%</p></div>`, `<button class="btn primary" onclick="this.closest('.modal-back').remove()">تم</button>`);
 }
+
+/* ---- Practice board (A4 write / draw / trace) ---- */
+const BOARD_W = 1000, BOARD_H = 1414;      // A4 ratio internal resolution
+const BOARD_TPLS = [
+  {k: 'blank', t: 'فارغ', g: '🗒️'},
+  {k: 'arabic', t: 'سطور عربية', g: '📝'},
+  {k: 'english', t: 'إنجليزي (٤ سطور)', g: '🔤'},
+  {k: 'math', t: 'رياضيات (مربّعات)', g: '➗'},
+  {k: 'dots', t: 'نقاط', g: '⋯'},
+  {k: 'boxes', t: 'خانات كتابة', g: '🔲'},
+];
+const isArabicText = s => /[؀-ۿ]/.test(s || '');
+PAGES.board = function () {
+  crumb('التمارين · اللوحة', 'كتابة ورسم وتتبّع');
+  const st = {
+    tpl: Store.lget('board-tpl', 'arabic'), color: '#1d4ed8', size: 6, tool: 'pen',
+    trace: '', traceSize: 120, traceRepeat: 3, traceStyle: 'dotted'
+  };
+  $('#view').innerHTML = `
+    <div class="page-head"><div><h2>🎨 لوحة التدريب والكتابة</h2><p>اكتب وارسم ولوّن على ورقة A4 — واستخدم أداة التتبّع للحروف المنقّطة.</p></div>
+      <a class="btn" href="#/exercises">◀ التمارين</a></div>
+    <div class="board-tools">
+      <div class="bt-group" id="tpl-row">${BOARD_TPLS.map(t => `<button class="tpl-btn ${t.k === st.tpl ? 'on' : ''}" data-tpl="${t.k}">${t.g} ${t.t}</button>`).join('')}</div>
+    </div>
+    <div class="board-tools">
+      <div class="bt-group" id="color-row">${['#111827', '#1d4ed8', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed', '#92400e', '#db2777'].map(c => `<button class="color-sw ${c === st.color ? 'on' : ''}" style="background:${c}" data-color="${c}"></button>`).join('')}</div>
+      <div class="bt-group">
+        <button class="tool-btn on" data-tool="pen" title="قلم">✏️</button>
+        <button class="tool-btn" data-tool="eraser" title="ممحاة">🧽</button>
+        <label class="bt-size">الحجم <input id="pen-size" type="range" min="2" max="26" value="${st.size}"></label>
+      </div>
+      <div class="bt-group">
+        <button class="btn sm" id="b-undo">↶ تراجع</button>
+        <button class="btn sm danger" id="b-clear">🗑 مسح</button>
+        <button class="btn sm" id="b-dl">⬇ حفظ صورة</button>
+        <button class="btn sm" id="b-print">🖨 طباعة</button>
+      </div>
+    </div>
+    <div class="board-tools trace-panel">
+      <b style="color:var(--teal-ink)">✍️ تتبّع الحروف / الكلمات المنقّطة</b>
+      <input id="tr-text" placeholder="اكتب هنا الحرف أو الكلمة أو الجملة… (للروضة والصف الأول)" style="flex:1;min-width:200px;padding:.55em .8em;border:1px solid var(--line);border-radius:10px">
+      <label class="bt-size">الخط <input id="tr-size" type="range" min="50" max="240" value="${st.traceSize}"></label>
+      <label class="bt-size">التكرار <input id="tr-rep" type="number" min="1" max="12" value="${st.traceRepeat}" style="width:56px"></label>
+      <div class="bt-group"><button class="tool-btn on" data-ts="dotted" title="منقّط">⁙</button><button class="tool-btn" data-ts="outline" title="مفرّغ">▢</button></div>
+      <button class="btn sm primary" id="tr-apply">تطبيق</button>
+      <button class="btn sm" id="tr-clear">إزالة النموذج</button>
+    </div>
+    <div class="sheet-scroll"><div class="sheet">
+      <canvas class="bg" width="${BOARD_W}" height="${BOARD_H}"></canvas>
+      <canvas class="ink" width="${BOARD_W}" height="${BOARD_H}"></canvas>
+    </div></div>`;
+
+  const bg = $('.sheet .bg'), ink = $('.sheet .ink');
+  const bctx = bg.getContext('2d'), ictx = ink.getContext('2d');
+  const undo = []; let drawing = false, last = null;
+
+  function drawGuide() {
+    bctx.clearRect(0, 0, BOARD_W, BOARD_H); bctx.fillStyle = '#fff'; bctx.fillRect(0, 0, BOARD_W, BOARD_H);
+    const M = 60;
+    const hline = (y, col, w, dash) => { bctx.beginPath(); bctx.setLineDash(dash || []); bctx.strokeStyle = col; bctx.lineWidth = w || 1; bctx.moveTo(M, y); bctx.lineTo(BOARD_W - M, y); bctx.stroke(); bctx.setLineDash([]); };
+    if (st.trace) { drawTrace(); return; }
+    if (st.tpl === 'arabic') { for (let y = M + 90; y < BOARD_H - M; y += 120) { hline(y, '#c7d2cc', 2); hline(y - 44, '#e6efec', 1, [4, 6]); } }
+    else if (st.tpl === 'english') { for (let y = M + 60; y < BOARD_H - M; y += 130) { hline(y - 55, '#dbe4ee', 1.5); hline(y - 27, '#93c5fd', 1, [5, 6]); hline(y, '#2563eb', 2); hline(y + 28, '#dbe4ee', 1.5); } }
+    else if (st.tpl === 'math') { bctx.strokeStyle = '#dbe7f3'; bctx.lineWidth = 1; for (let x = M; x <= BOARD_W - M; x += 40) { bctx.beginPath(); bctx.moveTo(x, M); bctx.lineTo(x, BOARD_H - M); bctx.stroke(); } for (let y = M; y <= BOARD_H - M; y += 40) { bctx.beginPath(); bctx.moveTo(M, y); bctx.lineTo(BOARD_W - M, y); bctx.stroke(); } }
+    else if (st.tpl === 'dots') { bctx.fillStyle = '#cbd5e1'; for (let x = M; x <= BOARD_W - M; x += 44) for (let y = M; y <= BOARD_H - M; y += 44) { bctx.beginPath(); bctx.arc(x, y, 2, 0, 7); bctx.fill(); } }
+    else if (st.tpl === 'boxes') { bctx.strokeStyle = '#c7d2cc'; bctx.lineWidth = 1.5; const cell = 130; for (let y = M; y + cell <= BOARD_H - M; y += cell + 16) for (let x = M; x + cell <= BOARD_W - M; x += cell + 10) bctx.strokeRect(x, y, cell, cell); }
+  }
+  function drawTrace() {
+    const txt = st.trace, ar = isArabicText(txt), size = st.traceSize;
+    const M = 60, rowH = size * 1.55; let y = M + size;
+    bctx.textBaseline = 'alphabetic'; bctx.direction = ar ? 'rtl' : 'ltr'; bctx.textAlign = ar ? 'right' : 'left';
+    bctx.font = `${size}px Cairo, Arial, sans-serif`;
+    for (let r = 0; r < st.traceRepeat && y < BOARD_H - M; r++) {
+      // baseline + midline guides for each row
+      bctx.beginPath(); bctx.setLineDash([]); bctx.strokeStyle = '#e2e8f0'; bctx.lineWidth = 1.5; bctx.moveTo(M, y); bctx.lineTo(BOARD_W - M, y); bctx.stroke();
+      bctx.beginPath(); bctx.setLineDash([4, 6]); bctx.strokeStyle = '#eef2f7'; bctx.moveTo(M, y - size * 0.5); bctx.lineTo(BOARD_W - M, y - size * 0.5); bctx.stroke(); bctx.setLineDash([]);
+      const x = ar ? BOARD_W - M : M;
+      bctx.strokeStyle = '#9aa7b4'; bctx.lineWidth = Math.max(1.5, size / 45);
+      bctx.setLineDash(st.traceStyle === 'dotted' ? [2, size / 10] : []);
+      bctx.strokeText(txt, x, y);
+      bctx.setLineDash([]);
+      y += rowH + 14;
+    }
+  }
+  function pushUndo() { try { undo.push(ink.toDataURL()); if (undo.length > 12) undo.shift(); } catch (e) {} }
+  function pos(e) { const r = ink.getBoundingClientRect(); return {x: (e.clientX - r.left) * (BOARD_W / r.width), y: (e.clientY - r.top) * (BOARD_H / r.height)}; }
+  function stroke(a, b) {
+    ictx.globalCompositeOperation = st.tool === 'eraser' ? 'destination-out' : 'source-over';
+    ictx.strokeStyle = st.color; ictx.lineJoin = ictx.lineCap = 'round';
+    ictx.lineWidth = st.tool === 'eraser' ? st.size * 3.5 : st.size;
+    ictx.beginPath(); ictx.moveTo(a.x, a.y); ictx.lineTo(b.x, b.y); ictx.stroke();
+  }
+  ink.addEventListener('pointerdown', e => { pushUndo(); drawing = true; try { ink.setPointerCapture(e.pointerId); } catch (x) {} last = pos(e); stroke(last, {x: last.x + 0.1, y: last.y + 0.1}); });
+  ink.addEventListener('pointermove', e => { if (!drawing) return; const p = pos(e); stroke(last, p); last = p; });
+  const end = () => { drawing = false; };
+  ink.addEventListener('pointerup', end); ink.addEventListener('pointerleave', end); ink.addEventListener('pointercancel', end);
+
+  const setTpl = k => { st.tpl = k; Store.lset('board-tpl', k); $$('#tpl-row .tpl-btn').forEach(b => b.classList.toggle('on', b.dataset.tpl === k)); drawGuide(); };
+  $$('#tpl-row .tpl-btn').forEach(b => b.onclick = () => setTpl(b.dataset.tpl));
+  $$('#color-row .color-sw').forEach(b => b.onclick = () => { st.color = b.dataset.color; st.tool = 'pen'; $$('#color-row .color-sw').forEach(x => x.classList.toggle('on', x === b)); $$('[data-tool]').forEach(x => x.classList.toggle('on', x.dataset.tool === 'pen')); });
+  $$('[data-tool]').forEach(b => b.onclick = () => { st.tool = b.dataset.tool; $$('[data-tool]').forEach(x => x.classList.toggle('on', x === b)); });
+  $('#pen-size').oninput = e => st.size = +e.target.value;
+  $('#b-undo').onclick = () => { const d = undo.pop(); ictx.clearRect(0, 0, BOARD_W, BOARD_H); if (d) { const im = new Image(); im.onload = () => ictx.drawImage(im, 0, 0); im.src = d; } };
+  $('#b-clear').onclick = () => armed($('#b-clear'), () => { ictx.clearRect(0, 0, BOARD_W, BOARD_H); undo.length = 0; });
+  const compose = () => { const c = document.createElement('canvas'); c.width = BOARD_W; c.height = BOARD_H; const x = c.getContext('2d'); x.drawImage(bg, 0, 0); x.drawImage(ink, 0, 0); return c; };
+  $('#b-dl').onclick = () => { const a = document.createElement('a'); a.download = 'OLS-تدريب.png'; a.href = compose().toDataURL('image/png'); a.click(); };
+  $('#b-print').onclick = () => { const url = compose().toDataURL('image/png'); const w = window.open(''); if (w) { w.document.write('<img src="' + url + '" style="width:100%" onload="print()">'); w.document.close(); } };
+  // trace panel
+  const applyTrace = () => { st.trace = $('#tr-text').value.trim(); st.traceSize = +$('#tr-size').value; st.traceRepeat = clamp(+$('#tr-rep').value || 1, 1, 12); drawGuide(); };
+  $('#tr-apply').onclick = applyTrace;
+  $('#tr-text').onkeydown = e => { if (e.key === 'Enter') applyTrace(); };
+  $('#tr-clear').onclick = () => { st.trace = ''; $('#tr-text').value = ''; drawGuide(); };
+  $$('[data-ts]').forEach(b => b.onclick = () => { st.traceStyle = b.dataset.ts; $$('[data-ts]').forEach(x => x.classList.toggle('on', x === b)); if (st.trace) drawGuide(); });
+
+  drawGuide();
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => drawGuide());
+};
 
 /* ---- Tests ---- */
 PAGES.tests = function () {
