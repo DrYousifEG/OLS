@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v2.1 · 2026-07-27';
+const APP_VERSION = 'v2.2 · 2026-07-27';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -900,11 +900,81 @@ const TPL_FOR_SUBJECT = {
 const tplForSubject = s => TPL_FOR_SUBJECT[s] || 'blank';
 const isArabicText = s => /[؀-ۿ]/.test(s || '');
 
+/* ---- ruled-page templates, drawn precisely on canvas ---- */
+const PG_M = 48;                                   // page margin
+function hLine(ctx, y, col, w, dash) {
+  ctx.save(); ctx.beginPath(); ctx.setLineDash(dash || []);
+  ctx.strokeStyle = col; ctx.lineWidth = w || 1;
+  ctx.moveTo(PG_M, y + 0.5); ctx.lineTo(PG_W - PG_M, y + 0.5); ctx.stroke(); ctx.restore();
+}
+function drawTemplate(ctx, tpl) {
+  if (tpl === 'arabic') {
+    // Arabic ruling: one clear baseline per line, a faint dashed guide at
+    // x-height above it, and a red margin on the right (RTL start edge).
+    const STEP = 64;
+    for (let y = 104; y <= PG_H - 40; y += STEP) {
+      hLine(ctx, y, '#b9cbc4', 1.6);
+      hLine(ctx, y - 26, '#e6efec', 1, [5, 7]);
+    }
+    ctx.save(); ctx.beginPath(); ctx.strokeStyle = '#f0b3b3'; ctx.lineWidth = 1.4;
+    ctx.moveTo(PG_W - PG_M - 34, 40); ctx.lineTo(PG_W - PG_M - 34, PG_H - 40); ctx.stroke(); ctx.restore();
+  } else if (tpl === 'english') {
+    // Zaner-Bloser style groups: ascender, dashed midline, solid baseline,
+    // descender — then a gap before the next group.
+    const GROUP = 108, A = 0, MID = 26, BASE = 52, DESC = 78;
+    for (let top = 76; top + DESC <= PG_H - 30; top += GROUP) {
+      hLine(ctx, top + A, '#cfe0f5', 1.2);
+      hLine(ctx, top + MID, '#8fc0f2', 1.3, [7, 7]);
+      hLine(ctx, top + BASE, '#2563eb', 2);
+      hLine(ctx, top + DESC, '#cfe0f5', 1.2);
+    }
+  } else if (tpl === 'math') {
+    ctx.save(); ctx.strokeStyle = '#dbe7f3'; ctx.lineWidth = 1;
+    for (let x = PG_M; x <= PG_W - PG_M; x += 34) { ctx.beginPath(); ctx.moveTo(x + 0.5, PG_M); ctx.lineTo(x + 0.5, PG_H - PG_M); ctx.stroke(); }
+    for (let y = PG_M; y <= PG_H - PG_M; y += 34) { ctx.beginPath(); ctx.moveTo(PG_M, y + 0.5); ctx.lineTo(PG_W - PG_M, y + 0.5); ctx.stroke(); }
+    ctx.restore();
+  } else if (tpl === 'boxes') {
+    ctx.save(); ctx.strokeStyle = '#c7d2cc'; ctx.lineWidth = 1.6;
+    const cell = 96, gap = 12;
+    for (let y = PG_M; y + cell <= PG_H - PG_M; y += cell + gap)
+      for (let x = PG_M; x + cell <= PG_W - PG_M; x += cell + gap) ctx.strokeRect(x, y, cell, cell);
+    ctx.restore();
+  } else if (tpl === 'dots') {
+    ctx.save(); ctx.fillStyle = '#cbd5e1';
+    for (let x = PG_M; x <= PG_W - PG_M; x += 34) for (let y = PG_M; y <= PG_H - PG_M; y += 34) { ctx.beginPath(); ctx.arc(x, y, 1.7, 0, 7); ctx.fill(); }
+    ctx.restore();
+  } else if (tpl === 'art') {
+    ctx.save(); ctx.strokeStyle = '#f4b53f'; ctx.lineWidth = 8; ctx.strokeRect(16, 16, PG_W - 32, PG_H - 32); ctx.restore();
+  } else if (tpl === 'music') {
+    ctx.save(); ctx.strokeStyle = '#334155'; ctx.lineWidth = 1.2;
+    for (let top = 90; top + 48 <= PG_H - 40; top += 126)
+      for (let k = 0; k < 5; k++) { const y = top + k * 12; ctx.beginPath(); ctx.moveTo(PG_M, y + 0.5); ctx.lineTo(PG_W - PG_M, y + 0.5); ctx.stroke(); }
+    ctx.restore();
+  }
+}
+function drawTraceText(ctx, tr) {
+  if (!tr || !tr.text) return;
+  const ar = isArabicText(tr.text), size = tr.size || 90;
+  ctx.save();
+  ctx.direction = ar ? 'rtl' : 'ltr'; ctx.textAlign = ar ? 'right' : 'left'; ctx.textBaseline = 'alphabetic';
+  ctx.font = `${size}px Cairo, Arial, sans-serif`;
+  let y = PG_M + size;
+  for (let r = 0; r < (tr.rep || 1) && y < PG_H - PG_M; r++) {
+    hLine(ctx, y, '#e6edf3', 1.4);
+    ctx.strokeStyle = '#9aa7b4'; ctx.lineWidth = Math.max(1.2, size / 48);
+    ctx.setLineDash(tr.style === 'outline' ? [] : [2, Math.max(4, size / 11)]);
+    ctx.strokeText(tr.text, ar ? PG_W - PG_M : PG_M, y);
+    ctx.setLineDash([]);
+    y += size * 1.5 + 12;
+  }
+  ctx.restore();
+}
+
 function createNotebook(host, opts) {
   opts = opts || {};
   const nb = {
     pages: [], readOnly: !!opts.readOnly, onOps: opts.onOps || null,
-    color: '#1d4ed8', width: 4, tool: 'pen', els: [], mySid: [],
+    color: '#1d4ed8', width: 4, brushWidth: 16, eraserWidth: 24, tool: 'pen', els: [], mySid: [],
   };
   const newPage = tpl => ({tpl: tpl || opts.tpl || 'blank', trace: null, strokes: []});
 
@@ -917,11 +987,12 @@ function createNotebook(host, opts) {
       const wrap = document.createElement('div');
       wrap.className = 'nb-page';
       wrap.innerHTML = `<div class="nb-num">${num(i + 1)}</div>
-        <canvas class="nb-trace" width="${PG_W}" height="${PG_H}"></canvas>
-        <canvas class="nb-ink" width="${PG_W}" height="${PG_H}"></canvas>`;
+        <canvas class="nb-guide" width="${PG_W}" height="${PG_H}"></canvas>
+        <canvas class="nb-ink" width="${PG_W}" height="${PG_H}"></canvas>
+        <div class="nb-cursor" hidden></div>`;
       host.querySelector('.nb-scroll').appendChild(wrap);
       const ink = wrap.querySelector('.nb-ink');
-      const rec = {wrap, ink, ictx: ink.getContext('2d'), trace: wrap.querySelector('.nb-trace')};
+      const rec = {wrap, ink, ictx: ink.getContext('2d'), guide: wrap.querySelector('.nb-guide'), cur: wrap.querySelector('.nb-cursor')};
       nb.els.push(rec);
       if (!nb.readOnly) wireDraw(rec, i);
     }
@@ -929,39 +1000,36 @@ function createNotebook(host, opts) {
   }
   function drawStroke(ictx, s) {
     const p = s.p; if (!p || p.length < 2) return;
+    ictx.save();
     ictx.globalCompositeOperation = s.e ? 'destination-out' : 'source-over';
     ictx.strokeStyle = s.c || '#111'; ictx.lineJoin = ictx.lineCap = 'round';
-    ictx.lineWidth = s.e ? (s.w || 4) * 3.5 : (s.w || 4);
+    ictx.lineWidth = s.w || 4;                       // eraser width is already absolute
+    if (s.b) { ictx.globalAlpha = 0.75; ictx.lineWidth = (s.w || 4); }   // brush: soft paint
     ictx.beginPath(); ictx.moveTo(p[0], p[1]);
     for (let i = 2; i < p.length; i += 2) ictx.lineTo(p[i], p[i + 1]);
     if (p.length === 2) ictx.lineTo(p[0] + 0.1, p[1] + 0.1);
-    ictx.stroke(); ictx.globalCompositeOperation = 'source-over';
+    ictx.stroke(); ictx.restore();
+  }
+  /* the width actually painted, per tool — eraser and brush have their own scales */
+  function activeWidth() {
+    if (nb.tool === 'eraser') return nb.eraserWidth;
+    if (nb.tool === 'brush') return nb.brushWidth;
+    return nb.width;
   }
   function repaint(i) {
     const rec = nb.els[i], pg = nb.pages[i]; if (!rec) return;
     rec.ictx.clearRect(0, 0, PG_W, PG_H);
     pg.strokes.forEach(s => drawStroke(rec.ictx, s));
-    paintTrace(i);
+    paintGuide(i);
   }
-  function paintTrace(i) {
+  /* guide layer = ruled template + (optional) dotted tracing model.
+     Drawn on canvas, not CSS gradients, so dashes and 4-line groups are exact. */
+  function paintGuide(i) {
     const rec = nb.els[i], pg = nb.pages[i]; if (!rec) return;
-    const ctx = rec.trace.getContext('2d');
+    const ctx = rec.guide.getContext('2d');
     ctx.clearRect(0, 0, PG_W, PG_H);
-    const tr = pg.trace; if (!tr || !tr.text) { rec.trace.style.display = 'none'; return; }
-    rec.trace.style.display = '';
-    const ar = isArabicText(tr.text), size = tr.size || 90, M = 46;
-    ctx.direction = ar ? 'rtl' : 'ltr'; ctx.textAlign = ar ? 'right' : 'left'; ctx.textBaseline = 'alphabetic';
-    ctx.font = `${size}px Cairo, Arial, sans-serif`;
-    let y = M + size;
-    for (let r = 0; r < (tr.rep || 1) && y < PG_H - M; r++) {
-      ctx.setLineDash([]); ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1.4;
-      ctx.beginPath(); ctx.moveTo(M, y); ctx.lineTo(PG_W - M, y); ctx.stroke();
-      ctx.strokeStyle = '#9aa7b4'; ctx.lineWidth = Math.max(1.2, size / 48);
-      ctx.setLineDash(tr.style === 'outline' ? [] : [2, Math.max(4, size / 11)]);
-      ctx.strokeText(tr.text, ar ? PG_W - M : M, y);
-      ctx.setLineDash([]);
-      y += size * 1.5 + 12;
-    }
+    drawTemplate(ctx, pg.tpl);
+    drawTraceText(ctx, pg.trace);
   }
 
   /* ---------------- ops ---------------- */
@@ -972,8 +1040,8 @@ function createNotebook(host, opts) {
     if (o.k === 's') { pg.strokes.push(o); if (nb.els[i]) drawStroke(nb.els[i].ictx, o); }
     else if (o.k === 'u') { const n = pg.strokes.length; pg.strokes = pg.strokes.filter(s => s.sid !== o.sid); if (pg.strokes.length !== n) repaint(i); }
     else if (o.k === 'c') { pg.strokes = []; repaint(i); }
-    else if (o.k === 't') { pg.tpl = o.v; ensureDom(); }
-    else if (o.k === 'tr') { pg.trace = {text: o.text, size: o.size, rep: o.rep, style: o.style}; paintTrace(i); }
+    else if (o.k === 't') { pg.tpl = o.v; ensureDom(); paintGuide(i); }
+    else if (o.k === 'tr') { pg.trace = {text: o.text, size: o.size, rep: o.rep, style: o.style}; paintGuide(i); }
   }
   function emit(op) { if (nb.onOps) nb.onOps([op]); }
 
@@ -987,17 +1055,33 @@ function createNotebook(host, opts) {
       pts = pos(e);
       e.preventDefault();
     });
+    // live size cursor: a circle showing exactly what the pen/brush/eraser covers
+    const showCursor = e => {
+      const r = rec.ink.getBoundingClientRect(), scale = r.width / PG_W;
+      const d = Math.max(6, activeWidth() * scale);
+      rec.cur.hidden = false;
+      rec.cur.style.width = rec.cur.style.height = d + 'px';
+      rec.cur.style.left = (e.clientX - r.left) + 'px';
+      rec.cur.style.top = (e.clientY - r.top) + 'px';
+      rec.cur.dataset.tool = nb.tool;
+      rec.cur.style.borderColor = nb.tool === 'eraser' ? '#dc2626' : nb.color;
+    };
+    rec.ink.addEventListener('pointerenter', showCursor);
+    rec.ink.addEventListener('pointerleave', () => { rec.cur.hidden = true; });
     rec.ink.addEventListener('pointermove', e => {
+      showCursor(e);
       if (!drawing) return;
       const p = pos(e), n = pts.length;
       // skip micro-moves to keep ops small
       if (Math.abs(p[0] - pts[n - 2]) + Math.abs(p[1] - pts[n - 1]) < 2) return;
       pts.push(p[0], p[1]);
-      drawStroke(rec.ictx, {p: [pts[n - 2], pts[n - 1], p[0], p[1]], c: nb.color, w: nb.width, e: nb.tool === 'eraser' ? 1 : 0});
+      drawStroke(rec.ictx, {p: [pts[n - 2], pts[n - 1], p[0], p[1]], c: nb.color, w: activeWidth(),
+        e: nb.tool === 'eraser' ? 1 : 0, b: nb.tool === 'brush' ? 1 : 0});
     });
     const end = () => {
       if (!drawing) return; drawing = false;
-      const op = {k: 's', pg: idx, sid: uid(), p: pts, c: nb.color, w: nb.width, e: nb.tool === 'eraser' ? 1 : 0};
+      const op = {k: 's', pg: idx, sid: uid(), p: pts, c: nb.color, w: activeWidth(),
+        e: nb.tool === 'eraser' ? 1 : 0, b: nb.tool === 'brush' ? 1 : 0};
       nb.pages[idx].strokes.push(op); nb.mySid.push({pg: idx, sid: op.sid});
       emit(op); pts = null;
     };
@@ -1054,8 +1138,14 @@ function notebookToolbar(nb, o) {
       <div class="bt-group">${['#111827', '#1d4ed8', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed', '#db2777', '#0891b2'].map((c, i) => `<button class="color-sw ${i === 1 ? 'on' : ''}" style="background:${c}" data-color="${c}"></button>`).join('')}</div>
       <div class="bt-group">
         <button class="tool-btn on" data-tool="pen" title="قلم">✏️</button>
+        <button class="tool-btn" data-tool="brush" title="فرشاة تلوين">🖌️</button>
         <button class="tool-btn" data-tool="eraser" title="ممحاة">🧽</button>
-        <label class="bt-size">الحجم <input class="pen-size" type="range" min="2" max="24" value="4"></label>
+      </div>
+      <div class="bt-group size-row">
+        <span class="bt-size" id="size-label">سُمك القلم</span>
+        ${[2, 4, 8, 14, 22].map((s, i) => `<button class="size-dot ${s === 4 ? 'on' : ''}" data-size="${s}" title="${s}"><i style="width:${Math.min(s, 16)}px;height:${Math.min(s, 16)}px"></i></button>`).join('')}
+        <input class="pen-size" type="range" min="1" max="60" value="4" title="حجم دقيق">
+        <span class="size-val">٤</span>
       </div>
       <div class="bt-group">
         <button class="btn sm" data-act="undo">↶ تراجع</button>
@@ -1066,9 +1156,30 @@ function notebookToolbar(nb, o) {
     </div>`;
 }
 function wireNotebookToolbar(root, nb) {
-  $$('[data-color]', root).forEach(b => b.onclick = () => { nb.color = b.dataset.color; nb.tool = 'pen'; $$('[data-color]', root).forEach(x => x.classList.toggle('on', x === b)); $$('[data-tool]', root).forEach(x => x.classList.toggle('on', x.dataset.tool === 'pen')); });
-  $$('[data-tool]', root).forEach(b => b.onclick = () => { nb.tool = b.dataset.tool; $$('[data-tool]', root).forEach(x => x.classList.toggle('on', x === b)); });
-  const ps = $('.pen-size', root); if (ps) ps.oninput = e => nb.width = +e.target.value;
+  const LABEL = {pen: 'سُمك القلم', brush: 'حجم الفرشاة', eraser: 'حجم الممحاة'};
+  const curSize = () => nb.tool === 'eraser' ? nb.eraserWidth : nb.tool === 'brush' ? nb.brushWidth : nb.width;
+  const setSize = v => {
+    v = clamp(Math.round(v), 1, 60);
+    if (nb.tool === 'eraser') nb.eraserWidth = v; else if (nb.tool === 'brush') nb.brushWidth = v; else nb.width = v;
+    syncSize();
+  };
+  function syncSize() {
+    const ps = $('.pen-size', root), lab = $('#size-label', root), val = $('.size-val', root);
+    if (ps) ps.value = curSize();
+    if (lab) lab.textContent = LABEL[nb.tool] || 'الحجم';
+    if (val) val.textContent = num(curSize());
+    $$('[data-size]', root).forEach(x => x.classList.toggle('on', +x.dataset.size === curSize()));
+  }
+  const pickTool = t => { nb.tool = t; $$('[data-tool]', root).forEach(x => x.classList.toggle('on', x.dataset.tool === t)); syncSize(); };
+  $$('[data-color]', root).forEach(b => b.onclick = () => {
+    nb.color = b.dataset.color;
+    if (nb.tool === 'eraser') pickTool('pen');
+    $$('[data-color]', root).forEach(x => x.classList.toggle('on', x === b));
+  });
+  $$('[data-tool]', root).forEach(b => b.onclick = () => pickTool(b.dataset.tool));
+  $$('[data-size]', root).forEach(b => b.onclick = () => setSize(+b.dataset.size));
+  const ps = $('.pen-size', root); if (ps) ps.oninput = e => setSize(+e.target.value);
+  syncSize();
   $$('[data-tpl]', root).forEach(b => b.onclick = () => { const i = nb.currentPage(); nb.setTemplate(i, b.dataset.tpl); $$('[data-tpl]', root).forEach(x => x.classList.toggle('on', x === b)); });
   $$('[data-act]', root).forEach(b => b.onclick = () => {
     const a = b.dataset.act, i = nb.currentPage();
@@ -2074,6 +2185,7 @@ function liveTeardown() {
   try { clearInterval(LIVE.timer); } catch (e) {}
   try { if (LIVE.stream) LIVE.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
   try { if (LIVE.jitsi) LIVE.jitsi.dispose(); } catch (e) {}
+  try { if (LIVE.onResize) { removeEventListener('resize', LIVE.onResize); removeEventListener('orientationchange', LIVE.onResize); } } catch (e) {}
   try { api('/api/room', 'POST', {class: LIVE.cid, leave: true}); } catch (e) {}
   LIVE = null;
   document.body.classList.remove('live-mode');
@@ -2131,6 +2243,7 @@ PAGES.live = function (params) {
           ${staff ? `<div id="tb-tools"></div>` : ''}
           <div class="lp-body" id="tb-host"></div>
         </section>
+        <div class="pane-splitter" id="lv-splitter" title="اسحب لتغيير حجم اللوحتين"><span></span></div>
         <section class="live-pane">
           <div class="lp-head"><b id="sb-title">📓 دفتري</b>
             <span class="muted" id="sb-note"></span>
@@ -2178,16 +2291,54 @@ PAGES.live = function (params) {
   wireNotebookToolbar($('#sb-tools'), LIVE.nbS);
 
   /* ---------------- controls ---------------- */
-  $('#lv-split').onclick = () => {
-    const w = $('.live-wrap'), n = w.dataset.split === 'side' ? 'stack' : 'side';
-    w.dataset.split = n; Store.lset('live-split', n);
-    $('#lv-split').textContent = n === 'side' ? '⬍ فوق/تحت' : '⬌ جنبًا لجنب';
+  const setSplit = n => {
+    const w = $('.live-wrap'); if (!w) return;
+    w.dataset.split = n;
+    const b = $('#lv-split'); if (b) b.textContent = n === 'side' ? '⬍ فوق/تحت' : '⬌ جنبًا لجنب';
   };
+  $('#lv-split').onclick = () => { const n = $('.live-wrap').dataset.split === 'side' ? 'stack' : 'side'; Store.lset('live-split', n); setSplit(n); };
+  /* keep the boards inside one screen: exact height (the bars wrap) and a
+     forced stacked layout on narrow screens, so the divider axis always matches */
+  const fitPanes = () => {
+    const p = $('#lv-panes'); if (!p) return;
+    if (innerWidth <= 920) setSplit('stack'); else setSplit(Store.lget('live-split', 'side'));
+    const top = p.getBoundingClientRect().top;
+    p.style.setProperty('--panes-h', Math.max(300, innerHeight - top - 14) + 'px');
+  };
+  LIVE.onResize = () => fitPanes();
+  addEventListener('resize', LIVE.onResize);
+  addEventListener('orientationchange', LIVE.onResize);
+  setTimeout(fitPanes, 60);
   $$('[data-fs]').forEach(b => b.onclick = () => {
     const pane = b.closest('.live-pane');
     pane.classList.toggle('solo');
-    $$('.live-pane').forEach(p => { if (p !== pane) p.hidden = pane.classList.contains('solo'); });
+    const solo = pane.classList.contains('solo');
+    $$('.live-pane').forEach(p => { if (p !== pane) p.hidden = solo; });
+    $('#lv-splitter').hidden = solo;
   });
+  /* draggable divider — works as a column resizer side-by-side and a row
+     resizer stacked, so both boards can be sized to fit one screen */
+  (function wireSplitter() {
+    const sp = $('#lv-splitter'), panes = $$('.live-pane'), wrap = $('.live-wrap');
+    let drag = false;
+    const applyFlex = (a, b) => { panes[0].style.flex = a + ' 1 0'; panes[1].style.flex = b + ' 1 0'; };
+    const saved = Store.lget('live-ratio', 50);
+    applyFlex(saved, 100 - saved);
+    const move = e => {
+      if (!drag) return;
+      const host = $('#lv-panes').getBoundingClientRect();
+      const vert = wrap.dataset.split === 'stack';
+      let pct = vert ? (e.clientY - host.top) / host.height * 100
+        : (document.dir === 'rtl' ? (host.right - e.clientX) : (e.clientX - host.left)) / host.width * 100;
+      pct = clamp(pct, 18, 82);
+      applyFlex(pct, 100 - pct); Store.lset('live-ratio', Math.round(pct));
+    };
+    sp.addEventListener('pointerdown', e => { drag = true; try { sp.setPointerCapture(e.pointerId); } catch (x) {} e.preventDefault(); });
+    sp.addEventListener('pointermove', move);
+    sp.addEventListener('pointerup', () => { drag = false; });
+    sp.addEventListener('pointercancel', () => { drag = false; });
+    sp.addEventListener('dblclick', () => { applyFlex(50, 50); Store.lset('live-ratio', 50); });
+  })();
   const hb = $('#lv-hand'); if (hb) hb.onclick = () => { LIVE.hand = !LIVE.hand; hb.classList.toggle('primary', LIVE.hand); hb.textContent = LIVE.hand ? '✋ يدك مرفوعة' : '✋ رفع اليد'; };
   $('#lv-cam').onclick = () => { const p = $('#lv-cam-panel'); p.hidden = !p.hidden; $('#lv-dock').dataset.open = '1'; if (!p.hidden) listCams(); };
   $('#lv-meet').onclick = () => toggleMeet(c);
