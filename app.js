@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v2.0 · 2026-07-16';
+const APP_VERSION = 'v2.1 · 2026-07-27';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -2073,8 +2073,11 @@ function liveTeardown() {
   if (!LIVE) return;
   try { clearInterval(LIVE.timer); } catch (e) {}
   try { if (LIVE.stream) LIVE.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { if (LIVE.jitsi) LIVE.jitsi.dispose(); } catch (e) {}
   try { api('/api/room', 'POST', {class: LIVE.cid, leave: true}); } catch (e) {}
   LIVE = null;
+  document.body.classList.remove('live-mode');
+  setNavCollapsed(Store.lget('nav-collapsed', false), false);   // restore the user's own preference
 }
 PAGES.live = function (params) {
   const cid = params[0], c = classById(cid);
@@ -2102,8 +2105,7 @@ PAGES.live = function (params) {
     </div>
 
     <div class="live-body">
-      <aside class="live-side" id="lv-side">
-        <div class="ls-h">👥 المشاركون <span id="lv-n" class="muted"></span></div>
+      <aside class="live-side" id="lv-side" hidden>
         <div id="lv-people" class="ls-people"></div>
         <div id="lv-cam-panel" class="ls-cam" hidden>
           <div class="ls-h">📹 كاميرا الإشراف</div>
@@ -2121,7 +2123,7 @@ PAGES.live = function (params) {
         </div>
       </aside>
 
-      <main class="live-panes">
+      <main class="live-panes" id="lv-panes">
         <section class="live-pane">
           <div class="lp-head"><b>🧑‍🏫 لوحة المعلّم</b>
             <span class="muted" id="tb-note">${staff ? 'أنت تكتب — الطلبة يشاهدون' : 'للمشاهدة فقط'}</span>
@@ -2139,12 +2141,27 @@ PAGES.live = function (params) {
       </main>
     </div>
 
+    <div class="people-dock" id="lv-dock" data-open="0">
+      <button class="pd-head" id="pd-toggle">👥 المشاركون <span id="lv-n">٠</span><span class="pd-caret">▲</span></button>
+      <div class="pd-body" id="pd-body"></div>
+    </div>
+
     <div id="lv-meet-wrap" class="live-meet" hidden>
       <div class="lm-head"><b>🎥 الاجتماع المرئي</b><div class="spacer"></div>
-        <button class="btn sm" id="lm-close">إغلاق</button></div>
+        <button class="btn sm" id="lm-share" title="مشاركة الشاشة">🖥️ مشاركة</button>
+        <button class="btn sm" id="lm-expand" title="تكبير">⛶</button>
+        <button class="btn sm danger" id="lm-close">✕</button></div>
       <div id="lm-frame"></div>
     </div>
    </div>`;
+
+  // participants + camera live in the bottom dock (frees the full width for the boards)
+  $('#pd-body').appendChild($('#lv-people'));
+  $('#pd-body').appendChild($('#lv-cam-panel'));
+  $('#lv-side').remove();
+  $('#pd-toggle').onclick = () => { const d = $('#lv-dock'); d.dataset.open = d.dataset.open === '1' ? '0' : '1'; };
+  setNavCollapsed(true, false);        // maximise board width while teaching
+  document.body.classList.add('live-mode');   // full-bleed view (no 1180px cap)
 
   /* ---------------- notebooks ---------------- */
   const tplDefault = tplForSubject(c.subject);
@@ -2172,9 +2189,14 @@ PAGES.live = function (params) {
     $$('.live-pane').forEach(p => { if (p !== pane) p.hidden = pane.classList.contains('solo'); });
   });
   const hb = $('#lv-hand'); if (hb) hb.onclick = () => { LIVE.hand = !LIVE.hand; hb.classList.toggle('primary', LIVE.hand); hb.textContent = LIVE.hand ? '✋ يدك مرفوعة' : '✋ رفع اليد'; };
-  $('#lv-cam').onclick = () => { const p = $('#lv-cam-panel'); p.hidden = !p.hidden; if (!p.hidden) listCams(); };
+  $('#lv-cam').onclick = () => { const p = $('#lv-cam-panel'); p.hidden = !p.hidden; $('#lv-dock').dataset.open = '1'; if (!p.hidden) listCams(); };
   $('#lv-meet').onclick = () => toggleMeet(c);
   $('#lm-close').onclick = () => toggleMeet(c, true);
+  $('#lm-expand').onclick = () => $('#lv-meet-wrap').classList.toggle('expanded');
+  $('#lm-share').onclick = () => {
+    if (LIVE && LIVE.jitsi && LIVE.jitsi.executeCommand) { LIVE.jitsi.executeCommand('toggleShareScreen'); toast('تبديل مشاركة الشاشة', 'ok'); }
+    else toast('استخدم زر مشاركة الشاشة داخل نافذة الاجتماع.', 'err');
+  };
   const ab = $('#lv-att');
   if (ab) ab.onclick = () => {
     const date = new Date().toISOString().slice(0, 10);
@@ -2237,8 +2259,8 @@ PAGES.live = function (params) {
   }
   function paintPeople() {
     const p = LIVE.presence, keys = Object.keys(p);
-    $('#lv-count').textContent = '👥 ' + num(keys.length);
-    $('#lv-n').textContent = num(keys.length);
+    const cEl = $('#lv-count'); if (cEl) cEl.textContent = '👥 ' + num(keys.length);
+    const nEl = $('#lv-n'); if (nEl) nEl.textContent = num(keys.length);
     const roster = classRoster(cid);
     const rows = keys.map(u => ({u, ...p[u]})).sort((a, b) => (a.r === 'معلم' ? -1 : 1) - (b.r === 'معلم' ? -1 : 1));
     const absent = roster.filter(e => !p[e.student]);
@@ -2274,15 +2296,37 @@ PAGES.live = function (params) {
   tick();
   PAGE_CLEANUP = liveTeardown;
 };
+function loadScript(src) {
+  return new Promise((res, rej) => {
+    if ([...document.scripts].some(s => s.src === src)) return res();
+    const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s);
+  });
+}
 function toggleMeet(c, forceClose) {
   const wrap = $('#lv-meet-wrap'), frame = $('#lm-frame');
-  if (forceClose || !wrap.hidden) { wrap.hidden = true; frame.innerHTML = ''; return; }
+  if (!wrap) return;
+  if (forceClose || !wrap.hidden) {
+    wrap.hidden = true; wrap.classList.remove('expanded');
+    try { if (LIVE && LIVE.jitsi) { LIVE.jitsi.dispose(); LIVE.jitsi = null; } } catch (e) {}
+    frame.innerHTML = ''; return;
+  }
   const host = Store.get('meetHost', 'meet.jit.si');
   const room = 'OLS-' + String(c.id).replace(/[^\w]/g, '') + '-' + c.grade;
-  const url = `https://${host}/${room}#userInfo.displayName=%22${encodeURIComponent(Auth.user.name)}%22&config.prejoinPageEnabled=false`;
-  frame.innerHTML = `<iframe src="${esc(url)}" allow="camera; microphone; fullscreen; display-capture; autoplay" allowfullscreen></iframe>
-    <p class="muted" style="font-size:.72rem;margin:6px 0 0">غرفة مرئية مشفّرة عبر Jitsi — تدعم الصوت والفيديو ومشاركة الشاشة. يمكن للمدير تغيير الخادم من الإعدادات.</p>`;
-  wrap.hidden = false;
+  wrap.hidden = false; frame.innerHTML = '<p class="muted" style="padding:14px">… يفتح غرفة الاجتماع</p>';
+  // The external API gives us in-app control (screen share, mute) — fall back to
+  // a plain iframe if the script can't load, so the meeting still works.
+  loadScript('https://' + host + '/external_api.js').then(() => {
+    frame.innerHTML = '';
+    LIVE.jitsi = new window.JitsiMeetExternalAPI(host, {
+      roomName: room, parentNode: frame,
+      userInfo: {displayName: Auth.user.name},
+      configOverwrite: {prejoinPageEnabled: false, startWithVideoMuted: true, startWithAudioMuted: true},
+      interfaceConfigOverwrite: {TOOLBAR_BUTTONS: ['microphone', 'camera', 'desktop', 'raisehand', 'tileview', 'chat', 'fullscreen', 'hangup']}
+    });
+  }).catch(() => {
+    const url = `https://${host}/${room}#userInfo.displayName=%22${encodeURIComponent(Auth.user.name)}%22&config.prejoinPageEnabled=false`;
+    frame.innerHTML = `<iframe src="${esc(url)}" allow="camera; microphone; fullscreen; display-capture; autoplay" allowfullscreen></iframe>`;
+  });
 }
 
 
@@ -2588,8 +2632,17 @@ async function logout() {
 }
 
 /* ------------------------------ boot ------------------------------------ */
+/* collapse the main nav into an overlay drawer to free page width */
+function setNavCollapsed(on, remember) {
+  document.body.classList.toggle('nav-collapsed', !!on);
+  if (!on) closeSidebar();
+  const b = $('#nav-toggle'); if (b) { b.textContent = on ? '⇤' : '⇥'; b.title = on ? 'إظهار القائمة الجانبية' : 'إخفاء القائمة الجانبية'; }
+  if (remember !== false) Store.lset('nav-collapsed', !!on);
+}
 async function boot() {
   primeVoices();
+  setNavCollapsed(Store.lget('nav-collapsed', false), false);
+  const ntg = $('#nav-toggle'); if (ntg) ntg.onclick = () => setNavCollapsed(!document.body.classList.contains('nav-collapsed'));
   NUM_MODE = Store.lget('num-mode', 'hindi');
   updateNumToggle();
   const nt = $('#num-toggle'); if (nt) nt.onclick = toggleNum;
