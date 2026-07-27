@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v1.8 · 2026-07-15';
+const APP_VERSION = 'v2.0 · 2026-07-16';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -320,12 +320,14 @@ function openBookReader(b) {
 /* ============================== ROUTER ================================== */
 const PAGES = {};
 let currentRoute = '';
+let PAGE_CLEANUP = null;   // pages with timers/streams register a teardown
 function router(isRefresh) {
   const hash = location.hash.replace(/^#\/?/, '');
   const parts = hash.split('/').filter(Boolean);
   const route = parts[0] || 'dashboard';
   currentRoute = route;
   $$('.nav-item').forEach(a => a.classList.toggle('active', a.dataset.view === route));
+  if (PAGE_CLEANUP) { try { PAGE_CLEANUP(); } catch (e) {} PAGE_CLEANUP = null; }
   const fn = PAGES[route] || PAGES.dashboard;
   const view = $('#view');
   if (!isRefresh) view.scrollTop = 0, window.scrollTo(0, 0);
@@ -862,121 +864,250 @@ function drillDone(ex, correct, total) {
     <p class="muted">نسبة النجاح ${num(pct)}%</p></div>`, `<button class="btn primary" onclick="this.closest('.modal-back').remove()">تم</button>`);
 }
 
-/* ---- Practice board (A4 write / draw / trace) ---- */
-const BOARD_W = 1000, BOARD_H = 1414;      // A4 ratio internal resolution
-const BOARD_TPLS = [
+/* ============================ NOTEBOOK ENGINE ============================
+   A multi-page A4 notebook used by BOTH the practice board (#/board) and the
+   live classroom. Everything is expressed as small serialisable ops so a board
+   can be streamed to other people in real time and replayed identically.
+
+   ops:  {k:'s',  pg, sid, p:[x,y,…], c, w, e}   stroke (e=1 → eraser)
+         {k:'u',  pg, sid}                        undo / remove one stroke
+         {k:'c',  pg}                             clear page
+         {k:'t',  pg, v}                          set page template
+         {k:'tr', pg, text, size, rep, style}     dotted/outline tracing model
+         {k:'ap', tpl}                            append a page
+   Page guides are CSS backgrounds (no canvas) so many pages stay cheap; only
+   the ink layer — and a trace layer when used — allocate a canvas.
+   ========================================================================= */
+const PG_W = 720, PG_H = 1018;               // internal page resolution (A4 ratio)
+const MAX_PAGES = 12;
+const NB_TPLS = [
   {k: 'blank', t: 'فارغ', g: '🗒️'},
-  {k: 'arabic', t: 'سطور عربية', g: '📝'},
-  {k: 'english', t: 'إنجليزي (٤ سطور)', g: '🔤'},
-  {k: 'math', t: 'رياضيات (مربّعات)', g: '➗'},
+  {k: 'arabic', t: 'عربي', g: '📝'},
+  {k: 'english', t: 'إنجليزي', g: '🔤'},
+  {k: 'math', t: 'رياضيات', g: '➗'},
+  {k: 'boxes', t: 'خانات', g: '🔲'},
   {k: 'dots', t: 'نقاط', g: '⋯'},
-  {k: 'boxes', t: 'خانات كتابة', g: '🔲'},
+  {k: 'art', t: 'رسم وتلوين', g: '🎨'},
+  {k: 'music', t: 'موسيقى', g: '🎼'},
 ];
+/* the template that suits a subject, used when a class opens its notebook */
+const TPL_FOR_SUBJECT = {
+  'اللغة العربية': 'arabic', 'التربية الإسلامية': 'arabic', 'الدراسات الاجتماعية': 'arabic',
+  'اللغة الإنجليزية': 'english', 'الرياضيات': 'math', 'العلوم': 'math', 'الفيزياء': 'math',
+  'الكيمياء': 'math', 'الأحياء': 'math', 'تقنية المعلومات': 'blank',
+  'الفنون التشكيلية': 'art', 'المهارات الموسيقية': 'music',
+};
+const tplForSubject = s => TPL_FOR_SUBJECT[s] || 'blank';
 const isArabicText = s => /[؀-ۿ]/.test(s || '');
-PAGES.board = function () {
-  crumb('التمارين · اللوحة', 'كتابة ورسم وتتبّع');
-  const st = {
-    tpl: Store.lget('board-tpl', 'arabic'), color: '#1d4ed8', size: 6, tool: 'pen',
-    trace: '', traceSize: 120, traceRepeat: 3, traceStyle: 'dotted'
+
+function createNotebook(host, opts) {
+  opts = opts || {};
+  const nb = {
+    pages: [], readOnly: !!opts.readOnly, onOps: opts.onOps || null,
+    color: '#1d4ed8', width: 4, tool: 'pen', els: [], mySid: [],
   };
-  $('#view').innerHTML = `
-    <div class="page-head"><div><h2>🎨 لوحة التدريب والكتابة</h2><p>اكتب وارسم ولوّن على ورقة A4 — واستخدم أداة التتبّع للحروف المنقّطة.</p></div>
-      <a class="btn" href="#/exercises">◀ التمارين</a></div>
-    <div class="board-tools">
-      <div class="bt-group" id="tpl-row">${BOARD_TPLS.map(t => `<button class="tpl-btn ${t.k === st.tpl ? 'on' : ''}" data-tpl="${t.k}">${t.g} ${t.t}</button>`).join('')}</div>
+  const newPage = tpl => ({tpl: tpl || opts.tpl || 'blank', trace: null, strokes: []});
+
+  /* ---------------- rendering ---------------- */
+  function pageEl(idx) { return nb.els[idx]; }
+  function ensureDom() {
+    while (nb.els.length > nb.pages.length) { const e = nb.els.pop(); e.wrap.remove(); }
+    while (nb.els.length < nb.pages.length) {
+      const i = nb.els.length;
+      const wrap = document.createElement('div');
+      wrap.className = 'nb-page';
+      wrap.innerHTML = `<div class="nb-num">${num(i + 1)}</div>
+        <canvas class="nb-trace" width="${PG_W}" height="${PG_H}"></canvas>
+        <canvas class="nb-ink" width="${PG_W}" height="${PG_H}"></canvas>`;
+      host.querySelector('.nb-scroll').appendChild(wrap);
+      const ink = wrap.querySelector('.nb-ink');
+      const rec = {wrap, ink, ictx: ink.getContext('2d'), trace: wrap.querySelector('.nb-trace')};
+      nb.els.push(rec);
+      if (!nb.readOnly) wireDraw(rec, i);
+    }
+    nb.pages.forEach((p, i) => { nb.els[i].wrap.dataset.tpl = p.tpl; nb.els[i].wrap.className = 'nb-page pg-' + p.tpl; });
+  }
+  function drawStroke(ictx, s) {
+    const p = s.p; if (!p || p.length < 2) return;
+    ictx.globalCompositeOperation = s.e ? 'destination-out' : 'source-over';
+    ictx.strokeStyle = s.c || '#111'; ictx.lineJoin = ictx.lineCap = 'round';
+    ictx.lineWidth = s.e ? (s.w || 4) * 3.5 : (s.w || 4);
+    ictx.beginPath(); ictx.moveTo(p[0], p[1]);
+    for (let i = 2; i < p.length; i += 2) ictx.lineTo(p[i], p[i + 1]);
+    if (p.length === 2) ictx.lineTo(p[0] + 0.1, p[1] + 0.1);
+    ictx.stroke(); ictx.globalCompositeOperation = 'source-over';
+  }
+  function repaint(i) {
+    const rec = nb.els[i], pg = nb.pages[i]; if (!rec) return;
+    rec.ictx.clearRect(0, 0, PG_W, PG_H);
+    pg.strokes.forEach(s => drawStroke(rec.ictx, s));
+    paintTrace(i);
+  }
+  function paintTrace(i) {
+    const rec = nb.els[i], pg = nb.pages[i]; if (!rec) return;
+    const ctx = rec.trace.getContext('2d');
+    ctx.clearRect(0, 0, PG_W, PG_H);
+    const tr = pg.trace; if (!tr || !tr.text) { rec.trace.style.display = 'none'; return; }
+    rec.trace.style.display = '';
+    const ar = isArabicText(tr.text), size = tr.size || 90, M = 46;
+    ctx.direction = ar ? 'rtl' : 'ltr'; ctx.textAlign = ar ? 'right' : 'left'; ctx.textBaseline = 'alphabetic';
+    ctx.font = `${size}px Cairo, Arial, sans-serif`;
+    let y = M + size;
+    for (let r = 0; r < (tr.rep || 1) && y < PG_H - M; r++) {
+      ctx.setLineDash([]); ctx.strokeStyle = '#e6edf3'; ctx.lineWidth = 1.4;
+      ctx.beginPath(); ctx.moveTo(M, y); ctx.lineTo(PG_W - M, y); ctx.stroke();
+      ctx.strokeStyle = '#9aa7b4'; ctx.lineWidth = Math.max(1.2, size / 48);
+      ctx.setLineDash(tr.style === 'outline' ? [] : [2, Math.max(4, size / 11)]);
+      ctx.strokeText(tr.text, ar ? PG_W - M : M, y);
+      ctx.setLineDash([]);
+      y += size * 1.5 + 12;
+    }
+  }
+
+  /* ---------------- ops ---------------- */
+  function applyOp(o, local) {
+    if (o.k === 'ap') { if (nb.pages.length < MAX_PAGES) { nb.pages.push(newPage(o.tpl)); ensureDom(); repaint(nb.pages.length - 1); } return; }
+    const i = Math.max(0, Math.min(nb.pages.length - 1, Number(o.pg) || 0));
+    const pg = nb.pages[i]; if (!pg) return;
+    if (o.k === 's') { pg.strokes.push(o); if (nb.els[i]) drawStroke(nb.els[i].ictx, o); }
+    else if (o.k === 'u') { const n = pg.strokes.length; pg.strokes = pg.strokes.filter(s => s.sid !== o.sid); if (pg.strokes.length !== n) repaint(i); }
+    else if (o.k === 'c') { pg.strokes = []; repaint(i); }
+    else if (o.k === 't') { pg.tpl = o.v; ensureDom(); }
+    else if (o.k === 'tr') { pg.trace = {text: o.text, size: o.size, rep: o.rep, style: o.style}; paintTrace(i); }
+  }
+  function emit(op) { if (nb.onOps) nb.onOps([op]); }
+
+  /* ---------------- input ---------------- */
+  function wireDraw(rec, idx) {
+    let drawing = false, pts = null;
+    const pos = e => { const r = rec.ink.getBoundingClientRect(); return [Math.round((e.clientX - r.left) * (PG_W / r.width)), Math.round((e.clientY - r.top) * (PG_H / r.height))]; };
+    rec.ink.addEventListener('pointerdown', e => {
+      if (nb.readOnly) return;
+      drawing = true; try { rec.ink.setPointerCapture(e.pointerId); } catch (x) {}
+      pts = pos(e);
+      e.preventDefault();
+    });
+    rec.ink.addEventListener('pointermove', e => {
+      if (!drawing) return;
+      const p = pos(e), n = pts.length;
+      // skip micro-moves to keep ops small
+      if (Math.abs(p[0] - pts[n - 2]) + Math.abs(p[1] - pts[n - 1]) < 2) return;
+      pts.push(p[0], p[1]);
+      drawStroke(rec.ictx, {p: [pts[n - 2], pts[n - 1], p[0], p[1]], c: nb.color, w: nb.width, e: nb.tool === 'eraser' ? 1 : 0});
+    });
+    const end = () => {
+      if (!drawing) return; drawing = false;
+      const op = {k: 's', pg: idx, sid: uid(), p: pts, c: nb.color, w: nb.width, e: nb.tool === 'eraser' ? 1 : 0};
+      nb.pages[idx].strokes.push(op); nb.mySid.push({pg: idx, sid: op.sid});
+      emit(op); pts = null;
+    };
+    rec.ink.addEventListener('pointerup', end);
+    rec.ink.addEventListener('pointercancel', end);
+    rec.ink.addEventListener('pointerleave', end);
+  }
+
+  /* ---------------- public API ---------------- */
+  nb.mount = function (pages) {
+    host.innerHTML = `<div class="nb-scroll"></div>`;
+    nb.pages = (pages && pages.length ? pages : [newPage()]).map(p => ({tpl: p.tpl || 'blank', trace: p.trace || null, strokes: (p.strokes || []).slice()}));
+    nb.els = []; ensureDom(); nb.pages.forEach((p, i) => repaint(i));
+  };
+  nb.applyRemote = function (ops) { (ops || []).forEach(o => applyOp(o, false)); };
+  nb.addPage = function (tpl) {
+    if (nb.pages.length >= MAX_PAGES) return toast('الحد الأقصى ' + num(MAX_PAGES) + ' صفحات', 'err');
+    const op = {k: 'ap', tpl: tpl || nb.pages[nb.pages.length - 1].tpl};
+    applyOp(op, true); emit(op);
+    const last = nb.els[nb.els.length - 1]; if (last) last.wrap.scrollIntoView({behavior: 'smooth', block: 'start'});
+  };
+  nb.setTemplate = function (i, v) { const op = {k: 't', pg: i, v}; applyOp(op, true); emit(op); };
+  nb.setTrace = function (i, tr) { const op = Object.assign({k: 'tr', pg: i}, tr); applyOp(op, true); emit(op); };
+  nb.clearPage = function (i) { const op = {k: 'c', pg: i}; applyOp(op, true); emit(op); };
+  nb.undo = function () {
+    const last = nb.mySid.pop(); if (!last) return;
+    const op = {k: 'u', pg: last.pg, sid: last.sid}; applyOp(op, true); emit(op);
+  };
+  nb.currentPage = function () {
+    // page whose centre is nearest the viewport centre
+    const mid = window.innerHeight / 2; let best = 0, bd = 1e9;
+    nb.els.forEach((e, i) => { const r = e.wrap.getBoundingClientRect(); const d = Math.abs((r.top + r.bottom) / 2 - mid); if (d < bd) { bd = d; best = i; } });
+    return best;
+  };
+  nb.exportPage = function (i) {
+    const c = document.createElement('canvas'); c.width = PG_W; c.height = PG_H;
+    const x = c.getContext('2d'); x.fillStyle = '#fff'; x.fillRect(0, 0, PG_W, PG_H);
+    const rec = nb.els[i]; if (!rec) return c;
+    // paint the CSS guide by rasterising it is not possible — draw a light grid hint instead
+    x.drawImage(rec.trace, 0, 0); x.drawImage(rec.ink, 0, 0);
+    return c;
+  };
+  nb.getPages = function () { return nb.pages.map(p => ({tpl: p.tpl, trace: p.trace, strokes: p.strokes})); };
+  return nb;
+}
+
+/* toolbar shared by the practice board and the live class */
+function notebookToolbar(nb, o) {
+  o = o || {};
+  return `<div class="board-tools">
+      <div class="bt-group" id="${o.id}-tpl">${NB_TPLS.map(t => `<button class="tpl-btn" data-tpl="${t.k}">${t.g} ${t.t}</button>`).join('')}</div>
     </div>
     <div class="board-tools">
-      <div class="bt-group" id="color-row">${['#111827', '#1d4ed8', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed', '#92400e', '#db2777'].map(c => `<button class="color-sw ${c === st.color ? 'on' : ''}" style="background:${c}" data-color="${c}"></button>`).join('')}</div>
+      <div class="bt-group">${['#111827', '#1d4ed8', '#dc2626', '#16a34a', '#f59e0b', '#7c3aed', '#db2777', '#0891b2'].map((c, i) => `<button class="color-sw ${i === 1 ? 'on' : ''}" style="background:${c}" data-color="${c}"></button>`).join('')}</div>
       <div class="bt-group">
         <button class="tool-btn on" data-tool="pen" title="قلم">✏️</button>
         <button class="tool-btn" data-tool="eraser" title="ممحاة">🧽</button>
-        <label class="bt-size">الحجم <input id="pen-size" type="range" min="2" max="26" value="${st.size}"></label>
+        <label class="bt-size">الحجم <input class="pen-size" type="range" min="2" max="24" value="4"></label>
       </div>
       <div class="bt-group">
-        <button class="btn sm" id="b-undo">↶ تراجع</button>
-        <button class="btn sm danger" id="b-clear">🗑 مسح</button>
-        <button class="btn sm" id="b-dl">⬇ حفظ صورة</button>
-        <button class="btn sm" id="b-print">🖨 طباعة</button>
+        <button class="btn sm" data-act="undo">↶ تراجع</button>
+        <button class="btn sm danger" data-act="clear">🗑 مسح الصفحة</button>
+        <button class="btn sm" data-act="addpage">➕ صفحة</button>
+        ${o.noExport ? '' : `<button class="btn sm" data-act="save">⬇ حفظ</button><button class="btn sm" data-act="print">🖨 طباعة</button>`}
       </div>
-    </div>
+    </div>`;
+}
+function wireNotebookToolbar(root, nb) {
+  $$('[data-color]', root).forEach(b => b.onclick = () => { nb.color = b.dataset.color; nb.tool = 'pen'; $$('[data-color]', root).forEach(x => x.classList.toggle('on', x === b)); $$('[data-tool]', root).forEach(x => x.classList.toggle('on', x.dataset.tool === 'pen')); });
+  $$('[data-tool]', root).forEach(b => b.onclick = () => { nb.tool = b.dataset.tool; $$('[data-tool]', root).forEach(x => x.classList.toggle('on', x === b)); });
+  const ps = $('.pen-size', root); if (ps) ps.oninput = e => nb.width = +e.target.value;
+  $$('[data-tpl]', root).forEach(b => b.onclick = () => { const i = nb.currentPage(); nb.setTemplate(i, b.dataset.tpl); $$('[data-tpl]', root).forEach(x => x.classList.toggle('on', x === b)); });
+  $$('[data-act]', root).forEach(b => b.onclick = () => {
+    const a = b.dataset.act, i = nb.currentPage();
+    if (a === 'undo') nb.undo();
+    else if (a === 'clear') armed(b, () => nb.clearPage(i));
+    else if (a === 'addpage') nb.addPage();
+    else if (a === 'save') { const c = nb.exportPage(i); const link = document.createElement('a'); link.download = 'OLS-صفحة-' + (i + 1) + '.png'; link.href = c.toDataURL('image/png'); link.click(); }
+    else if (a === 'print') { const url = nb.exportPage(i).toDataURL('image/png'); const w = window.open(''); if (w) { w.document.write('<img src="' + url + '" style="width:100%" onload="print()">'); w.document.close(); } }
+  });
+}
+
+/* ---- Practice board page (standalone, single user) ---- */
+PAGES.board = function () {
+  crumb('التمارين · اللوحة', 'كتابة ورسم وتتبّع');
+  $('#view').innerHTML = `
+    <div class="page-head"><div><h2>🎨 لوحة التدريب والكتابة</h2><p>دفتر A4 متعدّد الصفحات — اكتب وارسم ولوّن، وبدّل نوع التسطير لكل صفحة.</p></div>
+      <a class="btn" href="#/exercises">◀ التمارين</a></div>
+    ${notebookToolbar(null, {id: 'bd'})}
     <div class="board-tools trace-panel">
-      <b style="color:var(--teal-ink)">✍️ تتبّع الحروف / الكلمات المنقّطة</b>
-      <input id="tr-text" placeholder="اكتب هنا الحرف أو الكلمة أو الجملة… (للروضة والصف الأول)" style="flex:1;min-width:200px;padding:.55em .8em;border:1px solid var(--line);border-radius:10px">
-      <label class="bt-size">الخط <input id="tr-size" type="range" min="50" max="240" value="${st.traceSize}"></label>
-      <label class="bt-size">التكرار <input id="tr-rep" type="number" min="1" max="12" value="${st.traceRepeat}" style="width:56px"></label>
+      <b style="color:var(--teal-ink)">✍️ تتبّع الحروف والكلمات المنقّطة</b>
+      <input id="tr-text" placeholder="اكتب الحرف أو الكلمة أو الجملة…" style="flex:1;min-width:180px;padding:.55em .8em;border:1px solid var(--line);border-radius:10px">
+      <label class="bt-size">الخط <input id="tr-size" type="range" min="40" max="180" value="90"></label>
+      <label class="bt-size">التكرار <input id="tr-rep" type="number" min="1" max="10" value="3" style="width:54px"></label>
       <div class="bt-group"><button class="tool-btn on" data-ts="dotted" title="منقّط">⁙</button><button class="tool-btn" data-ts="outline" title="مفرّغ">▢</button></div>
       <button class="btn sm primary" id="tr-apply">تطبيق</button>
-      <button class="btn sm" id="tr-clear">إزالة النموذج</button>
+      <button class="btn sm" id="tr-clear">إزالة</button>
     </div>
-    <div class="sheet-scroll"><div class="sheet">
-      <canvas class="bg" width="${BOARD_W}" height="${BOARD_H}"></canvas>
-      <canvas class="ink" width="${BOARD_W}" height="${BOARD_H}"></canvas>
-    </div></div>`;
-
-  const bg = $('.sheet .bg'), ink = $('.sheet .ink');
-  const bctx = bg.getContext('2d'), ictx = ink.getContext('2d');
-  const undo = []; let drawing = false, last = null;
-
-  function drawGuide() {
-    bctx.clearRect(0, 0, BOARD_W, BOARD_H); bctx.fillStyle = '#fff'; bctx.fillRect(0, 0, BOARD_W, BOARD_H);
-    const M = 60;
-    const hline = (y, col, w, dash) => { bctx.beginPath(); bctx.setLineDash(dash || []); bctx.strokeStyle = col; bctx.lineWidth = w || 1; bctx.moveTo(M, y); bctx.lineTo(BOARD_W - M, y); bctx.stroke(); bctx.setLineDash([]); };
-    if (st.trace) { drawTrace(); return; }
-    if (st.tpl === 'arabic') { for (let y = M + 90; y < BOARD_H - M; y += 120) { hline(y, '#c7d2cc', 2); hline(y - 44, '#e6efec', 1, [4, 6]); } }
-    else if (st.tpl === 'english') { for (let y = M + 60; y < BOARD_H - M; y += 130) { hline(y - 55, '#dbe4ee', 1.5); hline(y - 27, '#93c5fd', 1, [5, 6]); hline(y, '#2563eb', 2); hline(y + 28, '#dbe4ee', 1.5); } }
-    else if (st.tpl === 'math') { bctx.strokeStyle = '#dbe7f3'; bctx.lineWidth = 1; for (let x = M; x <= BOARD_W - M; x += 40) { bctx.beginPath(); bctx.moveTo(x, M); bctx.lineTo(x, BOARD_H - M); bctx.stroke(); } for (let y = M; y <= BOARD_H - M; y += 40) { bctx.beginPath(); bctx.moveTo(M, y); bctx.lineTo(BOARD_W - M, y); bctx.stroke(); } }
-    else if (st.tpl === 'dots') { bctx.fillStyle = '#cbd5e1'; for (let x = M; x <= BOARD_W - M; x += 44) for (let y = M; y <= BOARD_H - M; y += 44) { bctx.beginPath(); bctx.arc(x, y, 2, 0, 7); bctx.fill(); } }
-    else if (st.tpl === 'boxes') { bctx.strokeStyle = '#c7d2cc'; bctx.lineWidth = 1.5; const cell = 130; for (let y = M; y + cell <= BOARD_H - M; y += cell + 16) for (let x = M; x + cell <= BOARD_W - M; x += cell + 10) bctx.strokeRect(x, y, cell, cell); }
-  }
-  function drawTrace() {
-    const txt = st.trace, ar = isArabicText(txt), size = st.traceSize;
-    const M = 60, rowH = size * 1.55; let y = M + size;
-    bctx.textBaseline = 'alphabetic'; bctx.direction = ar ? 'rtl' : 'ltr'; bctx.textAlign = ar ? 'right' : 'left';
-    bctx.font = `${size}px Cairo, Arial, sans-serif`;
-    for (let r = 0; r < st.traceRepeat && y < BOARD_H - M; r++) {
-      // baseline + midline guides for each row
-      bctx.beginPath(); bctx.setLineDash([]); bctx.strokeStyle = '#e2e8f0'; bctx.lineWidth = 1.5; bctx.moveTo(M, y); bctx.lineTo(BOARD_W - M, y); bctx.stroke();
-      bctx.beginPath(); bctx.setLineDash([4, 6]); bctx.strokeStyle = '#eef2f7'; bctx.moveTo(M, y - size * 0.5); bctx.lineTo(BOARD_W - M, y - size * 0.5); bctx.stroke(); bctx.setLineDash([]);
-      const x = ar ? BOARD_W - M : M;
-      bctx.strokeStyle = '#9aa7b4'; bctx.lineWidth = Math.max(1.5, size / 45);
-      bctx.setLineDash(st.traceStyle === 'dotted' ? [2, size / 10] : []);
-      bctx.strokeText(txt, x, y);
-      bctx.setLineDash([]);
-      y += rowH + 14;
-    }
-  }
-  function pushUndo() { try { undo.push(ink.toDataURL()); if (undo.length > 12) undo.shift(); } catch (e) {} }
-  function pos(e) { const r = ink.getBoundingClientRect(); return {x: (e.clientX - r.left) * (BOARD_W / r.width), y: (e.clientY - r.top) * (BOARD_H / r.height)}; }
-  function stroke(a, b) {
-    ictx.globalCompositeOperation = st.tool === 'eraser' ? 'destination-out' : 'source-over';
-    ictx.strokeStyle = st.color; ictx.lineJoin = ictx.lineCap = 'round';
-    ictx.lineWidth = st.tool === 'eraser' ? st.size * 3.5 : st.size;
-    ictx.beginPath(); ictx.moveTo(a.x, a.y); ictx.lineTo(b.x, b.y); ictx.stroke();
-  }
-  ink.addEventListener('pointerdown', e => { pushUndo(); drawing = true; try { ink.setPointerCapture(e.pointerId); } catch (x) {} last = pos(e); stroke(last, {x: last.x + 0.1, y: last.y + 0.1}); });
-  ink.addEventListener('pointermove', e => { if (!drawing) return; const p = pos(e); stroke(last, p); last = p; });
-  const end = () => { drawing = false; };
-  ink.addEventListener('pointerup', end); ink.addEventListener('pointerleave', end); ink.addEventListener('pointercancel', end);
-
-  const setTpl = k => { st.tpl = k; Store.lset('board-tpl', k); $$('#tpl-row .tpl-btn').forEach(b => b.classList.toggle('on', b.dataset.tpl === k)); drawGuide(); };
-  $$('#tpl-row .tpl-btn').forEach(b => b.onclick = () => setTpl(b.dataset.tpl));
-  $$('#color-row .color-sw').forEach(b => b.onclick = () => { st.color = b.dataset.color; st.tool = 'pen'; $$('#color-row .color-sw').forEach(x => x.classList.toggle('on', x === b)); $$('[data-tool]').forEach(x => x.classList.toggle('on', x.dataset.tool === 'pen')); });
-  $$('[data-tool]').forEach(b => b.onclick = () => { st.tool = b.dataset.tool; $$('[data-tool]').forEach(x => x.classList.toggle('on', x === b)); });
-  $('#pen-size').oninput = e => st.size = +e.target.value;
-  $('#b-undo').onclick = () => { const d = undo.pop(); ictx.clearRect(0, 0, BOARD_W, BOARD_H); if (d) { const im = new Image(); im.onload = () => ictx.drawImage(im, 0, 0); im.src = d; } };
-  $('#b-clear').onclick = () => armed($('#b-clear'), () => { ictx.clearRect(0, 0, BOARD_W, BOARD_H); undo.length = 0; });
-  const compose = () => { const c = document.createElement('canvas'); c.width = BOARD_W; c.height = BOARD_H; const x = c.getContext('2d'); x.drawImage(bg, 0, 0); x.drawImage(ink, 0, 0); return c; };
-  $('#b-dl').onclick = () => { const a = document.createElement('a'); a.download = 'OLS-تدريب.png'; a.href = compose().toDataURL('image/png'); a.click(); };
-  $('#b-print').onclick = () => { const url = compose().toDataURL('image/png'); const w = window.open(''); if (w) { w.document.write('<img src="' + url + '" style="width:100%" onload="print()">'); w.document.close(); } };
-  // trace panel
-  const applyTrace = () => { st.trace = $('#tr-text').value.trim(); st.traceSize = +$('#tr-size').value; st.traceRepeat = clamp(+$('#tr-rep').value || 1, 1, 12); drawGuide(); };
-  $('#tr-apply').onclick = applyTrace;
-  $('#tr-text').onkeydown = e => { if (e.key === 'Enter') applyTrace(); };
-  $('#tr-clear').onclick = () => { st.trace = ''; $('#tr-text').value = ''; drawGuide(); };
-  $$('[data-ts]').forEach(b => b.onclick = () => { st.traceStyle = b.dataset.ts; $$('[data-ts]').forEach(x => x.classList.toggle('on', x === b)); if (st.trace) drawGuide(); });
-
-  drawGuide();
-  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => drawGuide());
+    <div id="nb-host" class="nb-host"></div>`;
+  const nb = createNotebook($('#nb-host'), {tpl: Store.lget('board-tpl', 'arabic')});
+  nb.mount(Store.lget('board-pages', null));
+  wireNotebookToolbar($('#view'), nb);
+  $$('[data-tpl]').forEach(b => b.classList.toggle('on', b.dataset.tpl === Store.lget('board-tpl', 'arabic')));
+  let style = 'dotted';
+  $$('[data-ts]').forEach(b => b.onclick = () => { style = b.dataset.ts; $$('[data-ts]').forEach(x => x.classList.toggle('on', x === b)); });
+  const apply = () => nb.setTrace(nb.currentPage(), {text: $('#tr-text').value.trim(), size: +$('#tr-size').value, rep: clamp(+$('#tr-rep').value || 1, 1, 10), style});
+  $('#tr-apply').onclick = apply;
+  $('#tr-text').onkeydown = e => { if (e.key === 'Enter') apply(); };
+  $('#tr-clear').onclick = () => { $('#tr-text').value = ''; nb.setTrace(nb.currentPage(), {text: ''}); };
+  if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => nb.applyRemote([]));
 };
 
 /* ---- Tests ---- */
@@ -1470,6 +1601,690 @@ function kgDone(score, total) {
 }
 function shuffle(a) { a = a.slice(); for (let i = a.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1));[a[i], a[j]] = [a[j], a[i]]; } return a; }
 function uniqNums(must, lo, hi) { const s = new Set([must]); while (s.size < 3) s.add(lo + Math.floor(Math.random() * (hi - lo + 1))); return Array.from(s); }
+
+/* ======================= ACADEMY: classes · enrolment · fees ==============
+   Structure: المستوى (1–12) ← المادة ← المعلّم ← الصف (class section).
+   Teachers create classes (admin approves); students request enrolment in a
+   class (teacher or admin approves). Every approved enrolment can carry a fee
+   invoice, attendance records, graded work, and finally a certificate.
+   All records live in the synced KV store so every device sees the same data.
+   ========================================================================= */
+const SUBJECTS_ALL = ['اللغة العربية', 'اللغة الإنجليزية', 'الرياضيات', 'العلوم', 'التربية الإسلامية',
+  'الدراسات الاجتماعية', 'الفيزياء', 'الكيمياء', 'الأحياء', 'تقنية المعلومات',
+  'الفنون التشكيلية', 'المهارات الموسيقية', 'الرياضة المدرسية', 'المهارات الحياتية'];
+
+function classes() { return Store.get('classes', []); }
+function saveClasses(v) { Store.set('classes', v); }
+function enrolments() { return Store.get('enrolments', []); }
+function saveEnrolments(v) { Store.set('enrolments', v); }
+function attendance() { return Store.get('attendance', []); }
+function saveAttendance(v) { Store.set('attendance', v); }
+function fees() { return Store.get('fees', []); }
+function saveFees(v) { Store.set('fees', v); }
+function gradeItems() { return Store.get('gradeItems', []); }
+function saveGradeItems(v) { Store.set('gradeItems', v); }
+function certificates() { return Store.get('certificates', []); }
+function saveCertificates(v) { Store.set('certificates', v); }
+
+const classById = id => classes().find(c => c.id === id);
+const myEnrolment = cid => enrolments().find(e => e.classId === cid && e.student === Auth.user.u);
+const classRoster = cid => enrolments().filter(e => e.classId === cid && e.status === 'active');
+function myClasses() {
+  if (Auth.isTeacher) return classes().filter(c => c.teacher === Auth.user.u);
+  if (Auth.isAdmin) return classes();
+  if (Auth.isParent) { const ch = (meDir().child || ''); const ids = enrolments().filter(e => e.student === ch && e.status === 'active').map(e => e.classId); return classes().filter(c => ids.includes(c.id)); }
+  const ids = enrolments().filter(e => e.student === Auth.user.u && e.status === 'active').map(e => e.classId);
+  return classes().filter(c => ids.includes(c.id));
+}
+const canRunClass = c => c && (Auth.isAdmin || (Auth.isTeacher && c.teacher === Auth.user.u));
+function canJoinClass(c) {
+  if (!c) return false;
+  if (canRunClass(c)) return true;
+  const e = myEnrolment(c.id);
+  return !!(e && e.status === 'active');
+}
+const OMR = n => num(Number(n || 0).toFixed(3)) + ' ر.ع';
+/* weighted result → percentage, letter and pass/fail */
+function classResult(cid, studentU) {
+  const items = gradeItems().filter(g => g.classId === cid && g.student === studentU);
+  if (!items.length) return null;
+  let ws = 0, wt = 0;
+  items.forEach(g => { const w = Number(g.weight) || 1; ws += (g.score / g.total) * 100 * w; wt += w; });
+  const pct = Math.round(ws / wt);
+  const letter = pct >= 90 ? 'ممتاز' : pct >= 80 ? 'جيد جدًا' : pct >= 70 ? 'جيد' : pct >= 60 ? 'مقبول' : pct >= 50 ? 'ضعيف' : 'راسب';
+  return {pct, letter, pass: pct >= 60, items};
+}
+function attendanceRate(cid, studentU) {
+  const recs = attendance().filter(a => a.classId === cid);
+  if (!recs.length) return null;
+  const present = recs.filter(a => (a.records || {})[studentU] === 'present' || (a.records || {})[studentU] === 'late').length;
+  return {rate: Math.round(present / recs.length * 100), present, total: recs.length};
+}
+
+/* ------------------------------- pages ---------------------------------- */
+PAGES.classes = function (params) {
+  crumb('الصفوف الدراسية', 'المستوى ← المادة ← المعلّم');
+  const tab = params[0] || Store.lget('cls-tab', Auth.isStudent ? 'browse' : 'mine');
+  Store.lset('cls-tab', tab);
+  const tabs = [
+    {k: 'mine', t: Auth.isTeacher ? '📗 صفوفي التدريسية' : '🎒 صفوفي'},
+    {k: 'browse', t: '🔎 تصفّح الصفوف'},
+  ];
+  if (Auth.isAdmin) tabs.push({k: 'admin', t: '⚙️ الاعتمادات'});
+  if (Auth.isAdmin || Auth.isTeacher) tabs.push({k: 'fees', t: '💳 الرسوم'});
+  $('#view').innerHTML = `
+    <div class="page-head"><div><h2>🏫 الصفوف الدراسية</h2><p>نظام متكامل: تسجيل، حضور، تقييم، وشهادات — مصنّف حسب المستوى والمادة والمعلّم.</p></div>
+      ${(Auth.isTeacher || Auth.isAdmin) ? `<button class="btn primary" id="new-class">➕ إنشاء صف</button>` : ''}</div>
+    <div class="chip-row">${tabs.map(t => `<button class="tab-chip ${t.k === tab ? 'active' : ''}" data-ctab="${t.k}">${t.t}</button>`).join('')}</div>
+    <div id="cls-body"></div>`;
+  $$('[data-ctab]').forEach(b => b.onclick = () => { Store.lset('cls-tab', b.dataset.ctab); PAGES.classes([b.dataset.ctab]); });
+  const nc = $('#new-class'); if (nc) nc.onclick = () => classModal();
+  const body = $('#cls-body');
+  if (tab === 'browse') renderBrowse(body);
+  else if (tab === 'admin') renderClassAdmin(body);
+  else if (tab === 'fees') renderFees(body);
+  else renderMyClasses(body);
+};
+function classCard(c, ctx) {
+  const roster = classRoster(c.id).length;
+  const en = Auth.isStudent ? myEnrolment(c.id) : null;
+  const live = c.live && c.live.active;
+  return `<div class="class-card ${live ? 'live' : ''}">
+    <div class="cc-head" style="background:linear-gradient(135deg,${['#0e7c66', '#2563eb', '#7c3aed', '#e11d64', '#d97706'][Math.abs(hashStr(c.subject || '')) % 5]},#12a37d)">
+      <div class="cc-sub">${subjIcon(c.subject)} ${esc(c.subject)}</div>
+      <div class="cc-title">${esc(c.title || c.subject)}</div>
+      <div class="cc-meta">${esc(gradeName(c.grade))}</div>
+      ${live ? `<span class="live-dot">● مباشر الآن</span>` : ''}
+      ${c.status === 'pending' ? `<span class="cc-flag">بانتظار اعتماد المدير</span>` : ''}
+    </div>
+    <div class="cc-body">
+      <div class="cc-row">👨‍🏫 <b>${esc(c.teacherName || c.teacher)}</b></div>
+      ${c.schedule ? `<div class="cc-row muted">🗓 ${esc(c.schedule)}</div>` : ''}
+      <div class="cc-row muted">👥 ${num(roster)}${c.capacity ? ' / ' + num(c.capacity) : ''} طالب · ${Number(c.fee) > 0 ? '💳 ' + OMR(c.fee) : 'مجاني'}</div>
+    </div>
+    <div class="cc-actions">
+      ${canJoinClass(c) && c.status === 'active' ? `<button class="btn sm primary" data-live="${esc(c.id)}">🔴 الحصة المباشرة</button>` : ''}
+      ${(canRunClass(c) || (en && en.status === 'active') || Auth.isParent) ? `<button class="btn sm" data-open="${esc(c.id)}">التفاصيل</button>` : ''}
+      ${(Auth.isStudent && c.status === 'active') ? (
+        !en ? `<button class="btn sm gold" data-enrol="${esc(c.id)}">📝 طلب تسجيل</button>`
+        : en.status === 'pending' ? `<span class="pill gold">طلبك بانتظار الاعتماد</span>`
+        : en.status === 'rejected' ? `<span class="pill" style="background:#fdeaea;color:var(--danger)">مرفوض</span>` : '') : ''}
+    </div></div>`;
+}
+function wireClassCards(root) {
+  $$('[data-live]', root).forEach(b => b.onclick = () => go('live/' + b.dataset.live));
+  $$('[data-open]', root).forEach(b => b.onclick = () => classDetail(b.dataset.open));
+  $$('[data-enrol]', root).forEach(b => b.onclick = () => requestEnrolment(b.dataset.enrol));
+}
+function renderMyClasses(host) {
+  const list = myClasses().filter(c => Auth.isAdmin || c.status !== 'rejected');
+  host.innerHTML = list.length ? `<div class="class-grid">${list.map(c => classCard(c)).join('')}</div>`
+    : `<div class="empty"><div class="big">🏫</div>${Auth.isTeacher ? 'لم تنشئ صفوفًا بعد — اضغط «إنشاء صف».' : 'لست مسجّلًا في أي صف بعد — تصفّح الصفوف واطلب التسجيل.'}</div>`;
+  wireClassCards(host);
+}
+function renderBrowse(host) {
+  const all = classes().filter(c => c.status === 'active' && visibleTo({grade: c.grade}));
+  if (!all.length) { host.innerHTML = `<div class="empty"><div class="big">🔎</div>لا توجد صفوف معتمدة بعد.</div>`; return; }
+  const byGrade = {};
+  all.forEach(c => (byGrade[c.grade] = byGrade[c.grade] || []).push(c));
+  host.innerHTML = Object.keys(byGrade).sort((a, b) => a - b).map(g => {
+    const bySub = {};
+    byGrade[g].forEach(c => (bySub[c.subject] = bySub[c.subject] || []).push(c));
+    return `<div class="section-title">🎓 ${esc(gradeName(+g))}</div>` +
+      Object.keys(bySub).map(sub => `<div class="browse-sub">${subjIcon(sub)} ${esc(sub)}
+        <span class="muted" style="font-weight:400;font-size:.8rem">— ${num(bySub[sub].length)} صف · ${num(new Set(bySub[sub].map(c => c.teacher)).size)} معلّم</span></div>
+        <div class="class-grid">${bySub[sub].map(c => classCard(c)).join('')}</div>`).join('');
+  }).join('');
+  wireClassCards(host);
+}
+function renderClassAdmin(host) {
+  const pend = classes().filter(c => c.status === 'pending');
+  const pendEn = enrolments().filter(e => e.status === 'pending');
+  host.innerHTML = `
+    <div class="section-title">🏫 صفوف بانتظار الاعتماد (${num(pend.length)})</div>
+    ${pend.length ? `<div class="class-grid">${pend.map(c => classCard(c)).join('')}</div>
+      <div class="row" style="margin:10px 0">${pend.map(c => `<button class="btn sm primary" data-appc="${esc(c.id)}">✔ اعتماد: ${esc(c.title || c.subject)}</button>`).join('')}</div>`
+      : `<p class="muted">لا توجد صفوف بانتظار الاعتماد.</p>`}
+    <div class="section-title">📝 طلبات تسجيل الطلبة (${num(pendEn.length)})</div>
+    ${pendEn.length ? `<div class="card" style="padding:0;overflow:auto"><table class="tbl">
+      <tr><th>الطالب</th><th>الصف</th><th>المعلّم</th><th>الرسوم</th><th>إجراء</th></tr>
+      ${pendEn.map(e => { const c = classById(e.classId) || {}; return `<tr>
+        <td><b>${esc(e.studentName)}</b><br><span class="muted" style="font-size:.75rem">@${esc(e.student)}</span></td>
+        <td>${esc(c.title || c.subject || '—')}<br><span class="muted" style="font-size:.75rem">${esc(gradeName(c.grade))}</span></td>
+        <td>${esc(c.teacherName || '—')}</td><td>${Number(c.fee) > 0 ? OMR(c.fee) : 'مجاني'}</td>
+        <td><div class="row" style="gap:5px"><button class="btn sm primary" data-appe="${esc(e.id)}">قبول</button><button class="btn sm danger" data-reje="${esc(e.id)}">رفض</button></div></td></tr>`; }).join('')}</table></div>`
+      : `<p class="muted">لا توجد طلبات تسجيل.</p>`}`;
+  wireClassCards(host);
+  $$('[data-appc]', host).forEach(b => b.onclick = () => { const cs = classes(); const c = cs.find(x => x.id === b.dataset.appc); if (c) { c.status = 'active'; saveClasses(cs); toast('تم اعتماد الصف', 'ok'); PAGES.classes(['admin']); } });
+  $$('[data-appe]', host).forEach(b => b.onclick = () => decideEnrolment(b.dataset.appe, 'active'));
+  $$('[data-reje]', host).forEach(b => b.onclick = () => decideEnrolment(b.dataset.reje, 'rejected'));
+}
+function decideEnrolment(id, status) {
+  const es = enrolments(); const e = es.find(x => x.id === id); if (!e) return;
+  e.status = status; e.decidedBy = Auth.user.u; e.decidedAt = Date.now();
+  saveEnrolments(es);
+  if (status === 'active') {
+    const c = classById(e.classId);
+    if (c && Number(c.fee) > 0 && !fees().some(f => f.classId === c.id && f.student === e.student)) {
+      const fs = fees();
+      fs.push({id: uid(), classId: c.id, student: e.student, studentName: e.studentName, amount: Number(c.fee),
+        status: 'unpaid', issued: Date.now(), term: c.term || ''});
+      saveFees(fs);
+    }
+  }
+  toast(status === 'active' ? 'تم قبول الطالب' : 'تم رفض الطلب', 'ok');
+  PAGES.classes();
+}
+function requestEnrolment(cid) {
+  const c = classById(cid); if (!c) return;
+  const roster = classRoster(cid).length;
+  const body = `<p>سيتم إرسال طلب تسجيلك في صف <b>${esc(c.title || c.subject)}</b> — ${esc(gradeName(c.grade))} مع المعلّم <b>${esc(c.teacherName)}</b>.</p>
+    ${c.schedule ? `<p class="muted">🗓 ${esc(c.schedule)}</p>` : ''}
+    <div class="card" style="background:var(--panel-2)">
+      <div class="row"><b>الرسوم:</b> <span>${Number(c.fee) > 0 ? OMR(c.fee) : 'مجاني'}</span></div>
+      ${Number(c.fee) > 0 ? `<p class="muted" style="font-size:.8rem;margin:.5em 0 0">تُصدَر فاتورة الرسوم عند قبول طلبك، وتُسدَّد لدى إدارة المدرسة ثم يعتمدها المدير في النظام.</p>` : ''}
+      ${c.capacity ? `<p class="muted" style="font-size:.8rem;margin:.4em 0 0">المقاعد: ${num(roster)} / ${num(c.capacity)}</p>` : ''}
+    </div>`;
+  const m = modal('طلب تسجيل في صف', body, `<button class="btn primary" id="en-go">إرسال الطلب</button>`);
+  $('#en-go', m.el).onclick = () => {
+    if (c.capacity && roster >= c.capacity) { m.close(); return toast('اكتمل العدد في هذا الصف.', 'err'); }
+    const es = enrolments();
+    es.push({id: uid(), classId: cid, student: Auth.user.u, studentName: Auth.user.name, status: 'pending', requested: Date.now()});
+    saveEnrolments(es); m.close(); toast('تم إرسال الطلب — بانتظار الاعتماد', 'ok'); PAGES.classes();
+  };
+}
+function classModal(existing) {
+  const c = existing || {};
+  const body = `
+    <div class="row" style="gap:10px">
+      <div class="field" style="flex:1"><label>المستوى</label><select id="c-grade">${DATA.levels.map(l => `<option value="${l.grade}" ${c.grade === l.grade ? 'selected' : ''}>${esc(l.name)}</option>`).join('')}</select></div>
+      <div class="field" style="flex:1"><label>المادة</label><select id="c-sub">${SUBJECTS_ALL.map(s => `<option ${c.subject === s ? 'selected' : ''}>${s}</option>`).join('')}</select></div>
+    </div>
+    <div class="field"><label>اسم الصف / الشعبة</label><input id="c-title" value="${esc(c.title || '')}" placeholder="مثال: رياضيات ٥ — شعبة أ"></div>
+    ${Auth.isAdmin ? `<div class="field"><label>المعلّم</label><select id="c-teacher">${DIRECTORY.filter(u => u.role === 'معلم').map(t => `<option value="${esc(t.u)}" ${c.teacher === t.u ? 'selected' : ''}>${esc(t.name)}</option>`).join('') || '<option value="">— لا يوجد معلمون معتمدون —</option>'}</select></div>` : ''}
+    <div class="row" style="gap:10px">
+      <div class="field" style="flex:1"><label>المواعيد</label><input id="c-sched" value="${esc(c.schedule || '')}" placeholder="الأحد والثلاثاء ٥:٠٠م"></div>
+      <div class="field" style="width:110px"><label>الرسوم (ر.ع)</label><input id="c-fee" type="number" step="0.5" value="${c.fee || 0}"></div>
+      <div class="field" style="width:100px"><label>عدد المقاعد</label><input id="c-cap" type="number" value="${c.capacity || 25}"></div>
+    </div>
+    <div class="field"><label>وصف موجز</label><textarea id="c-desc" rows="2">${esc(c.desc || '')}</textarea></div>`;
+  const m = modal(existing ? 'تعديل الصف' : 'إنشاء صف جديد', body, `<button class="btn primary" id="c-save">${existing ? 'حفظ' : 'إنشاء'}</button>`);
+  $('#c-save', m.el).onclick = () => {
+    const cs = classes();
+    const item = existing ? cs.find(x => x.id === existing.id) : {id: uid(), created: Date.now()};
+    item.grade = +$('#c-grade', m.el).value; item.subject = $('#c-sub', m.el).value;
+    item.title = $('#c-title', m.el).value.trim() || item.subject;
+    item.schedule = $('#c-sched', m.el).value.trim(); item.fee = Number($('#c-fee', m.el).value) || 0;
+    item.capacity = Number($('#c-cap', m.el).value) || 0; item.desc = $('#c-desc', m.el).value.trim();
+    const tSel = $('#c-teacher', m.el);
+    if (tSel && tSel.value) { item.teacher = tSel.value; const t = DIRECTORY.find(x => x.u === tSel.value); item.teacherName = t ? t.name : tSel.value; }
+    else if (!existing) { item.teacher = Auth.user.u; item.teacherName = Auth.user.name; }
+    if (!existing) { item.status = Auth.isAdmin ? 'active' : 'pending'; cs.push(item); }
+    saveClasses(cs); m.close();
+    toast(existing ? 'تم الحفظ' : (Auth.isAdmin ? 'تم إنشاء الصف' : 'أُرسل الصف لاعتماد المدير'), 'ok');
+    PAGES.classes();
+  };
+}
+
+/* ---- class detail: roster · attendance · grades · certificate ---- */
+function classDetail(cid) {
+  const c = classById(cid); if (!c) return;
+  const staff = canRunClass(c);
+  const roster = classRoster(cid);
+  const body = `
+    <div class="row" style="gap:8px;margin-bottom:10px">
+      <span class="pill teal">${subjIcon(c.subject)} ${esc(c.subject)}</span>
+      <span class="pill">${esc(gradeName(c.grade))}</span>
+      <span class="pill">👨‍🏫 ${esc(c.teacherName)}</span>
+      ${Number(c.fee) > 0 ? `<span class="pill gold">💳 ${OMR(c.fee)}</span>` : '<span class="pill">مجاني</span>'}
+    </div>
+    ${c.desc ? `<p class="muted">${esc(c.desc)}</p>` : ''}
+    <div class="chip-row" id="cd-tabs">
+      <button class="tab-chip active" data-cd="roster">👥 الطلبة</button>
+      <button class="tab-chip" data-cd="att">🗓 الحضور</button>
+      <button class="tab-chip" data-cd="grades">📊 الدرجات</button>
+      <button class="tab-chip" data-cd="cert">🏅 الشهادات</button>
+    </div>
+    <div id="cd-body"></div>`;
+  const foot = `${canJoinClass(c) ? `<button class="btn primary" id="cd-live">🔴 دخول الحصة المباشرة</button>` : ''}
+    ${staff ? `<button class="btn" id="cd-edit">✏️ تعديل</button>` : ''}
+    ${Auth.isAdmin ? `<button class="btn danger" id="cd-del">🗑 حذف الصف</button>` : ''}`;
+  const m = modal(c.title || c.subject, body, foot, {wide: true});
+  const bodyEl = $('#cd-body', m.el);
+  const paint = tab => {
+    if (tab === 'att') renderAttendance(bodyEl, c, roster, staff);
+    else if (tab === 'grades') renderGrades(bodyEl, c, roster, staff);
+    else if (tab === 'cert') renderCerts(bodyEl, c, roster, staff);
+    else renderRoster(bodyEl, c, staff);
+  };
+  $$('[data-cd]', m.el).forEach(b => b.onclick = () => { $$('[data-cd]', m.el).forEach(x => x.classList.toggle('active', x === b)); paint(b.dataset.cd); });
+  paint('roster');
+  const lv = $('#cd-live', m.el); if (lv) lv.onclick = () => { m.close(); go('live/' + cid); };
+  const ed = $('#cd-edit', m.el); if (ed) ed.onclick = () => { m.close(); classModal(c); };
+  const dl = $('#cd-del', m.el); if (dl) dl.onclick = () => armed(dl, () => { saveClasses(classes().filter(x => x.id !== cid)); m.close(); toast('تم الحذف', 'ok'); PAGES.classes(); });
+}
+function renderRoster(host, c, staff) {
+  const roster = classRoster(c.id);
+  const pend = enrolments().filter(e => e.classId === c.id && e.status === 'pending');
+  host.innerHTML = `
+    ${staff && pend.length ? `<div class="card" style="border-color:var(--gold);margin-bottom:10px">
+      <b>⏳ ${num(pend.length)} طلب تسجيل</b>
+      <div class="row" style="margin-top:8px">${pend.map(e => `<span class="row" style="gap:4px"><b>${esc(e.studentName)}</b>
+        <button class="btn sm primary" data-appe2="${esc(e.id)}">قبول</button><button class="btn sm danger" data-reje2="${esc(e.id)}">رفض</button></span>`).join('')}</div></div>` : ''}
+    ${roster.length ? `<table class="tbl"><tr><th>الطالب</th><th>الحضور</th><th>التقييم</th><th>الرسوم</th></tr>
+      ${roster.map(e => {
+        const at = attendanceRate(c.id, e.student), r = classResult(c.id, e.student);
+        const f = fees().find(x => x.classId === c.id && x.student === e.student);
+        return `<tr><td><b>${esc(e.studentName)}</b></td>
+          <td>${at ? num(at.rate) + '%' : '—'}</td>
+          <td>${r ? `<b>${num(r.pct)}%</b> · ${esc(r.letter)}` : '—'}</td>
+          <td>${f ? (f.status === 'paid' ? '<span class="pill teal">مسدّدة</span>' : f.status === 'waived' ? '<span class="pill">معفاة</span>' : '<span class="pill gold">غير مسدّدة</span>') : (Number(c.fee) > 0 ? '—' : 'مجاني')}</td></tr>`;
+      }).join('')}</table>` : `<div class="empty">لا يوجد طلبة مسجّلون بعد.</div>`}`;
+  $$('[data-appe2]', host).forEach(b => b.onclick = () => { decideEnrolment(b.dataset.appe2, 'active'); renderRoster(host, c, staff); });
+  $$('[data-reje2]', host).forEach(b => b.onclick = () => { decideEnrolment(b.dataset.reje2, 'rejected'); renderRoster(host, c, staff); });
+}
+function renderAttendance(host, c, roster, staff) {
+  const recs = attendance().filter(a => a.classId === c.id).sort((a, b) => b.date.localeCompare(a.date));
+  const today = new Date().toISOString().slice(0, 10);
+  host.innerHTML = `
+    ${staff ? `<div class="row" style="margin-bottom:10px"><input id="at-date" type="date" value="${today}" style="padding:.5em;border:1px solid var(--line);border-radius:10px">
+      <button class="btn sm primary" id="at-take">🗓 كشف حضور اليوم</button></div>` : ''}
+    ${recs.length ? `<div style="max-height:300px;overflow:auto"><table class="tbl"><tr><th>التاريخ</th><th>حاضر</th><th>غائب</th><th>متأخر</th></tr>
+      ${recs.map(a => { const v = Object.values(a.records || {});
+        return `<tr><td>${num(a.date)}</td><td>${num(v.filter(x => x === 'present').length)}</td><td>${num(v.filter(x => x === 'absent').length)}</td><td>${num(v.filter(x => x === 'late').length)}</td></tr>`; }).join('')}</table></div>`
+      : `<div class="empty">لا توجد سجلات حضور بعد.</div>`}`;
+  const tk = $('#at-take', host);
+  if (tk) tk.onclick = () => {
+    const date = $('#at-date', host).value || today;
+    if (!roster.length) return toast('لا يوجد طلبة مسجّلون', 'err');
+    const existing = attendance().find(a => a.classId === c.id && a.date === date);
+    const cur = (existing && existing.records) || {};
+    const b = `<p class="muted">حدّد حالة كل طالب ليوم ${num(date)}</p>
+      ${roster.map(e => `<div class="row" style="justify-content:space-between;border-bottom:1px solid var(--line);padding:.45em 0">
+        <b>${esc(e.studentName)}</b>
+        <span class="seg"><button class="seg-btn ${cur[e.student] === 'present' ? 'on' : ''}" data-at="${esc(e.student)}" data-v="present">حاضر</button>
+        <button class="seg-btn ${cur[e.student] === 'late' ? 'on' : ''}" data-at="${esc(e.student)}" data-v="late">متأخر</button>
+        <button class="seg-btn ${cur[e.student] === 'absent' ? 'on' : ''}" data-at="${esc(e.student)}" data-v="absent">غائب</button></span></div>`).join('')}`;
+    const mm = modal('كشف الحضور — ' + num(date), b, `<button class="btn primary" id="at-save">حفظ الكشف</button>`);
+    const picks = Object.assign({}, cur);
+    $$('[data-at]', mm.el).forEach(btn => btn.onclick = () => {
+      picks[btn.dataset.at] = btn.dataset.v;
+      $$(`[data-at="${btn.dataset.at}"]`, mm.el).forEach(x => x.classList.toggle('on', x === btn));
+    });
+    $('#at-save', mm.el).onclick = () => {
+      const all = attendance(); const rec = all.find(a => a.classId === c.id && a.date === date);
+      if (rec) rec.records = picks; else all.push({id: uid(), classId: c.id, date, records: picks, by: Auth.user.u});
+      saveAttendance(all); mm.close(); toast('تم حفظ الحضور', 'ok'); renderAttendance(host, c, roster, staff);
+    };
+  };
+}
+function renderGrades(host, c, roster, staff) {
+  const items = gradeItems().filter(g => g.classId === c.id);
+  const mine = Auth.isStudent ? items.filter(g => g.student === Auth.user.u) : items;
+  host.innerHTML = `
+    ${staff ? `<button class="btn sm primary" id="g-add" style="margin-bottom:10px">➕ إضافة تقييم</button>` : ''}
+    ${staff ? `<table class="tbl"><tr><th>الطالب</th><th>النتيجة المرجّحة</th><th>التقدير</th></tr>
+      ${roster.map(e => { const r = classResult(c.id, e.student);
+        return `<tr><td><b>${esc(e.studentName)}</b></td><td>${r ? num(r.pct) + '%' : '—'}</td><td>${r ? esc(r.letter) : '—'}</td></tr>`; }).join('')}</table>
+      <div class="section-title">سجل التقييمات</div>` : ''}
+    ${mine.length ? `<div style="max-height:260px;overflow:auto"><table class="tbl"><tr>${staff ? '<th>الطالب</th>' : ''}<th>النوع</th><th>العنوان</th><th>الدرجة</th><th>الوزن</th>${staff ? '<th></th>' : ''}</tr>
+      ${mine.map(g => `<tr>${staff ? `<td>${esc(g.studentName)}</td>` : ''}<td>${esc(g.kind)}</td><td>${esc(g.title)}</td>
+        <td><b>${num(g.score)}/${num(g.total)}</b></td><td>${num(g.weight || 1)}</td>
+        ${staff ? `<td><button class="btn sm danger" data-gdel="${esc(g.id)}">🗑</button></td>` : ''}</tr>`).join('')}</table></div>`
+      : `<div class="empty">لا توجد تقييمات بعد.</div>`}`;
+  $$('[data-gdel]', host).forEach(b => b.onclick = () => { saveGradeItems(gradeItems().filter(x => x.id !== b.dataset.gdel)); renderGrades(host, c, roster, staff); });
+  const ga = $('#g-add', host);
+  if (ga) ga.onclick = () => {
+    const b = `<div class="field"><label>الطالب</label><select id="g-st"><option value="__all">— جميع الطلبة —</option>${roster.map(e => `<option value="${esc(e.student)}">${esc(e.studentName)}</option>`).join('')}</select></div>
+      <div class="row" style="gap:10px">
+        <div class="field" style="flex:1"><label>النوع</label><select id="g-kind"><option>اختبار قصير</option><option>اختبار</option><option>امتحان نهائي</option><option>مشاركة</option><option>واجب</option></select></div>
+        <div class="field" style="flex:1"><label>العنوان</label><input id="g-title" placeholder="الوحدة الأولى"></div>
+      </div>
+      <div class="row" style="gap:10px">
+        <div class="field" style="flex:1"><label>الدرجة</label><input id="g-score" type="number" value="0"></div>
+        <div class="field" style="flex:1"><label>من</label><input id="g-total" type="number" value="10"></div>
+        <div class="field" style="flex:1"><label>الوزن</label><input id="g-w" type="number" value="1" step="0.5"></div>
+      </div>`;
+    const mm = modal('إضافة تقييم', b, `<button class="btn primary" id="g-save">حفظ</button>`);
+    $('#g-save', mm.el).onclick = () => {
+      const stu = $('#g-st', mm.el).value, all = gradeItems();
+      const targets = stu === '__all' ? roster : roster.filter(e => e.student === stu);
+      if (!targets.length) return toast('لا يوجد طلبة', 'err');
+      targets.forEach(e => all.push({id: uid(), classId: c.id, student: e.student, studentName: e.studentName,
+        kind: $('#g-kind', mm.el).value, title: $('#g-title', mm.el).value.trim() || $('#g-kind', mm.el).value,
+        score: Number($('#g-score', mm.el).value) || 0, total: Number($('#g-total', mm.el).value) || 10,
+        weight: Number($('#g-w', mm.el).value) || 1, date: Date.now(), by: Auth.user.u}));
+      saveGradeItems(all); mm.close(); toast('تم حفظ التقييم', 'ok'); renderGrades(host, c, roster, staff);
+    };
+  };
+}
+function renderCerts(host, c, roster, staff) {
+  const targets = staff ? roster : roster.filter(e => e.student === Auth.user.u);
+  host.innerHTML = `<p class="muted">تُصدر الشهادة بناءً على التقييم المرجّح للمادة${staff ? ' — يعتمدها المعلّم أو المدير.' : '.'}</p>
+    ${targets.length ? `<table class="tbl"><tr><th>الطالب</th><th>النتيجة</th><th>التقدير</th><th>الحضور</th><th></th></tr>
+      ${targets.map(e => { const r = classResult(c.id, e.student), at = attendanceRate(c.id, e.student);
+        const cert = certificates().find(x => x.classId === c.id && x.student === e.student);
+        return `<tr><td><b>${esc(e.studentName)}</b></td>
+          <td>${r ? num(r.pct) + '%' : '—'}</td><td>${r ? esc(r.letter) : '—'}</td><td>${at ? num(at.rate) + '%' : '—'}</td>
+          <td>${cert ? `<button class="btn sm" data-cview="${esc(cert.id)}">🏅 عرض الشهادة</button>`
+            : (staff && r && r.pass) ? `<button class="btn sm primary" data-cissue="${esc(e.student)}">إصدار</button>`
+            : (r && !r.pass) ? '<span class="muted" style="font-size:.78rem">لم يجتز</span>' : '<span class="muted" style="font-size:.78rem">—</span>'}</td></tr>`; }).join('')}</table>`
+      : `<div class="empty">لا يوجد طلبة.</div>`}`;
+  $$('[data-cissue]', host).forEach(b => b.onclick = () => {
+    const e = roster.find(x => x.student === b.dataset.cissue); const r = classResult(c.id, e.student);
+    const cs = certificates();
+    const cert = {id: uid(), serial: 'OLS-' + String(Date.now()).slice(-8), classId: c.id, student: e.student,
+      studentName: e.studentName, subject: c.subject, grade: c.grade, percent: r.pct, letter: r.letter,
+      teacherName: c.teacherName, issued: Date.now(), issuedBy: Auth.user.name};
+    cs.push(cert); saveCertificates(cs); toast('تم إصدار الشهادة 🏅', 'ok'); renderCerts(host, c, roster, staff);
+  });
+  $$('[data-cview]', host).forEach(b => b.onclick = () => showCertificate(b.dataset.cview));
+}
+function showCertificate(id) {
+  const ct = certificates().find(x => x.id === id); if (!ct) return;
+  const html = `<div class="certificate" id="cert-sheet">
+      <div class="cert-border">
+        <img src="assets/logo.svg" class="cert-logo" alt="OLS">
+        <div class="cert-h1">شهادة إتمام</div>
+        <div class="cert-sub">نظام التعلّم العُماني — OLS</div>
+        <p class="cert-txt">تشهد إدارة النظام بأن الطالب/ة</p>
+        <div class="cert-name">${esc(ct.studentName)}</div>
+        <p class="cert-txt">قد أتمّ بنجاح متطلبات مادة</p>
+        <div class="cert-subject">${subjIcon(ct.subject)} ${esc(ct.subject)} — ${esc(gradeName(ct.grade))}</div>
+        <div class="cert-score"><span>النتيجة: <b>${num(ct.percent)}%</b></span><span>التقدير: <b>${esc(ct.letter)}</b></span></div>
+        <div class="cert-foot">
+          <div><div class="cert-line"></div>المعلّم: ${esc(ct.teacherName || '—')}</div>
+          <div><div class="cert-line"></div>الاعتماد: ${esc(ct.issuedBy)}</div>
+        </div>
+        <div class="cert-serial">رقم الشهادة: ${esc(ct.serial)} · التاريخ: ${num(arDate(ct.issued))}</div>
+      </div></div>`;
+  const m = modal('🏅 الشهادة', html, `<button class="btn primary" id="cert-print">🖨 طباعة / حفظ PDF</button>`, {wide: true});
+  $('#cert-print', m.el).onclick = () => {
+    const w = window.open('');
+    if (!w) return toast('اسمح بالنوافذ المنبثقة للطباعة', 'err');
+    w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>شهادة</title>
+      <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;800&display=swap" rel="stylesheet">
+      <link rel="stylesheet" href="${location.origin}/styles.css"></head>
+      <body style="font-family:Cairo,sans-serif;padding:0;margin:0">${$('#cert-sheet', m.el).outerHTML}
+      <script>setTimeout(()=>print(),600)<\/script></body></html>`);
+    w.document.close();
+  };
+}
+/* ---- fees ledger (records only — no card processing) ---- */
+function renderFees(host) {
+  const scope = Auth.isAdmin ? fees() : fees().filter(f => (classById(f.classId) || {}).teacher === Auth.user.u);
+  const unpaid = scope.filter(f => f.status === 'unpaid');
+  const total = scope.filter(f => f.status === 'paid').reduce((s, f) => s + Number(f.amount || 0), 0);
+  host.innerHTML = `
+    <div class="stat-tiles" style="margin-bottom:14px">
+      <div class="stat"><div class="k">إجمالي الفواتير</div><div class="v">${num(scope.length)}</div></div>
+      <div class="stat g"><div class="k">غير مسدّدة</div><div class="v">${num(unpaid.length)}</div></div>
+      <div class="stat b"><div class="k">المحصّل</div><div class="v" style="font-size:1.3rem">${OMR(total)}</div></div>
+      <div class="stat p"><div class="k">المستحق</div><div class="v" style="font-size:1.3rem">${OMR(unpaid.reduce((s, f) => s + Number(f.amount || 0), 0))}</div></div>
+    </div>
+    <p class="muted" style="font-size:.8rem">💡 هذا سجلّ مالي لتوثيق الرسوم والإيصالات. لا تتم معالجة بطاقات داخل التطبيق — يُسدَّد المبلغ لدى الإدارة (أو عبر بوابة دفع تُربط لاحقًا) ثم يُعتمد هنا.</p>
+    ${scope.length ? `<div class="card" style="padding:0;overflow:auto"><table class="tbl">
+      <tr><th>الطالب</th><th>الصف</th><th>المبلغ</th><th>الحالة</th><th>إجراء</th></tr>
+      ${scope.map(f => { const c = classById(f.classId) || {}; return `<tr>
+        <td><b>${esc(f.studentName)}</b></td><td>${esc(c.title || c.subject || '—')}</td><td>${OMR(f.amount)}</td>
+        <td>${f.status === 'paid' ? `<span class="pill teal">مسدّدة</span>` : f.status === 'waived' ? '<span class="pill">معفاة</span>' : '<span class="pill gold">غير مسدّدة</span>'}</td>
+        <td><div class="row" style="gap:5px">
+          ${f.status !== 'paid' ? `<button class="btn sm primary" data-fpay="${esc(f.id)}">تسجيل سداد</button>` : `<button class="btn sm" data-frec="${esc(f.id)}">🧾 إيصال</button>`}
+          ${Auth.isAdmin && f.status === 'unpaid' ? `<button class="btn sm" data-fwaive="${esc(f.id)}">إعفاء</button>` : ''}
+        </div></td></tr>`; }).join('')}</table></div>`
+      : `<div class="empty"><div class="big">💳</div>لا توجد فواتير بعد.</div>`}`;
+  $$('[data-fpay]', host).forEach(b => b.onclick = () => {
+    const f = fees().find(x => x.id === b.dataset.fpay);
+    const bd = `<p>تسجيل سداد رسوم <b>${esc(f.studentName)}</b> بمبلغ <b>${OMR(f.amount)}</b>.</p>
+      <div class="field"><label>طريقة السداد</label><select id="f-m"><option>نقدًا</option><option>تحويل بنكي</option><option>بطاقة لدى الإدارة</option><option>أخرى</option></select></div>
+      <div class="field"><label>رقم المرجع / الإيصال</label><input id="f-r" placeholder="اختياري"></div>`;
+    const mm = modal('تسجيل سداد', bd, `<button class="btn primary" id="f-ok">تأكيد السداد</button>`);
+    $('#f-ok', mm.el).onclick = () => {
+      const all = fees(); const x = all.find(y => y.id === f.id);
+      x.status = 'paid'; x.paidAt = Date.now(); x.method = $('#f-m', mm.el).value; x.ref = $('#f-r', mm.el).value.trim(); x.by = Auth.user.name;
+      saveFees(all); mm.close(); toast('تم تسجيل السداد', 'ok'); renderFees(host);
+    };
+  });
+  $$('[data-fwaive]', host).forEach(b => b.onclick = () => { const all = fees(); const x = all.find(y => y.id === b.dataset.fwaive); x.status = 'waived'; x.by = Auth.user.name; saveFees(all); renderFees(host); });
+  $$('[data-frec]', host).forEach(b => b.onclick = () => {
+    const f = fees().find(x => x.id === b.dataset.frec), c = classById(f.classId) || {};
+    modal('🧾 إيصال سداد', `<div class="receipt">
+      <div class="row" style="justify-content:space-between"><b>نظام التعلّم العُماني — OLS</b><span class="muted">${esc(f.ref || f.id.slice(0, 8))}</span></div>
+      <hr><p><b>الطالب:</b> ${esc(f.studentName)}</p><p><b>الصف:</b> ${esc(c.title || c.subject || '—')} — ${esc(gradeName(c.grade))}</p>
+      <p><b>المبلغ:</b> ${OMR(f.amount)}</p><p><b>الطريقة:</b> ${esc(f.method || '—')}</p>
+      <p><b>التاريخ:</b> ${num(arDate(f.paidAt))}</p><p><b>استلمه:</b> ${esc(f.by || '—')}</p>
+      <hr><p class="muted" style="font-size:.78rem">إيصال إلكتروني صادر من نظام OLS.</p></div>`,
+      `<button class="btn primary" onclick="window.print()">🖨 طباعة</button>`);
+  });
+}
+
+/* ========================== LIVE CLASSROOM ===============================
+   A real classroom session for one class: presence, a teaching board the
+   students can watch (but not edit), a personal notebook for every student
+   that the teacher can open and co-edit live, an optional supervision camera,
+   and an optional video meeting.
+
+   Sync is a single POST every 2s that both sends my new ops + heartbeat and
+   receives everyone else's — shared hosts kill long-lived connections, so
+   fast-polling is deliberately chosen over WebSocket/SSE.
+   ========================================================================= */
+let LIVE = null;
+function liveTeardown() {
+  if (!LIVE) return;
+  try { clearInterval(LIVE.timer); } catch (e) {}
+  try { if (LIVE.stream) LIVE.stream.getTracks().forEach(t => t.stop()); } catch (e) {}
+  try { api('/api/room', 'POST', {class: LIVE.cid, leave: true}); } catch (e) {}
+  LIVE = null;
+}
+PAGES.live = function (params) {
+  const cid = params[0], c = classById(cid);
+  if (!c) { $('#view').innerHTML = `<div class="empty"><div class="big">🏫</div>الصف غير موجود.<br><a class="btn" href="#/classes" style="margin-top:10px">◀ الصفوف</a></div>`; return; }
+  if (!canJoinClass(c)) { $('#view').innerHTML = `<div class="empty"><div class="big">🔒</div>لست مسجّلًا في هذا الصف.<br><a class="btn" href="#/classes" style="margin-top:10px">◀ الصفوف</a></div>`; return; }
+  const staff = canRunClass(c);
+  crumb('الحصة المباشرة', c.title || c.subject);
+  const split = Store.lget('live-split', innerWidth >= innerHeight ? 'side' : 'stack');
+  LIVE = {cid, c, staff, since: {}, out: [], focus: '', presence: {}, hand: false, timer: null, stream: null, t0: Date.now()};
+
+  $('#view').innerHTML = `
+   <div class="live-wrap" data-split="${split}">
+    <div class="live-bar">
+      <div class="lb-title"><span class="live-dot">●</span> ${esc(c.title || c.subject)}
+        <span class="muted" style="font-weight:500">· ${esc(gradeName(c.grade))} · ${esc(c.teacherName)}</span></div>
+      <div class="spacer"></div>
+      <span class="pill" id="lv-timer">٠٠:٠٠</span>
+      <span class="pill teal" id="lv-count">👥 ٠</span>
+      <button class="btn sm" id="lv-split" title="تبديل التخطيط">${split === 'side' ? '⬍ فوق/تحت' : '⬌ جنبًا لجنب'}</button>
+      ${!staff ? `<button class="btn sm" id="lv-hand">✋ رفع اليد</button>` : ''}
+      <button class="btn sm" id="lv-cam">📹 كاميرا</button>
+      <button class="btn sm" id="lv-meet">🎥 اجتماع</button>
+      ${staff ? `<button class="btn sm primary" id="lv-att">🗓 تسجيل الحضور</button>` : ''}
+      <a class="btn sm danger" href="#/classes">✕ خروج</a>
+    </div>
+
+    <div class="live-body">
+      <aside class="live-side" id="lv-side">
+        <div class="ls-h">👥 المشاركون <span id="lv-n" class="muted"></span></div>
+        <div id="lv-people" class="ls-people"></div>
+        <div id="lv-cam-panel" class="ls-cam" hidden>
+          <div class="ls-h">📹 كاميرا الإشراف</div>
+          <select id="cam-dev" class="cam-sel"></select>
+          <video id="cam-view" playsinline muted></video>
+          <div class="row" style="gap:6px">
+            <button class="btn sm primary" id="cam-start">تشغيل</button>
+            <button class="btn sm" id="cam-stop">إيقاف</button>
+          </div>
+          <div class="field" style="margin:8px 0 0"><label style="font-size:.75rem">كاميرا شبكية (IP / واي‑فاي)</label>
+            <input id="cam-url" placeholder="http://192.168.1.20:8080/video" style="font-size:.8rem">
+            <button class="btn sm" id="cam-ip" style="margin-top:6px">عرض البث</button></div>
+          <img id="cam-ipview" hidden>
+          <p class="muted" style="font-size:.7rem;margin:6px 0 0">تظهر هنا أي كاميرا يتعرّف عليها الجهاز (USB أو لاسلكية)، أو كاميرا شبكية عبر رابط بثّها، أو استخدم هاتفًا ثانيًا بالدخول للحصة منه.</p>
+        </div>
+      </aside>
+
+      <main class="live-panes">
+        <section class="live-pane">
+          <div class="lp-head"><b>🧑‍🏫 لوحة المعلّم</b>
+            <span class="muted" id="tb-note">${staff ? 'أنت تكتب — الطلبة يشاهدون' : 'للمشاهدة فقط'}</span>
+            <div class="spacer"></div><button class="btn sm" data-fs="t">⛶</button></div>
+          ${staff ? `<div id="tb-tools"></div>` : ''}
+          <div class="lp-body" id="tb-host"></div>
+        </section>
+        <section class="live-pane">
+          <div class="lp-head"><b id="sb-title">📓 دفتري</b>
+            <span class="muted" id="sb-note"></span>
+            <div class="spacer"></div><button class="btn sm" data-fs="s">⛶</button></div>
+          <div id="sb-tools"></div>
+          <div class="lp-body" id="sb-host"></div>
+        </section>
+      </main>
+    </div>
+
+    <div id="lv-meet-wrap" class="live-meet" hidden>
+      <div class="lm-head"><b>🎥 الاجتماع المرئي</b><div class="spacer"></div>
+        <button class="btn sm" id="lm-close">إغلاق</button></div>
+      <div id="lm-frame"></div>
+    </div>
+   </div>`;
+
+  /* ---------------- notebooks ---------------- */
+  const tplDefault = tplForSubject(c.subject);
+  const queue = (owner, ops) => ops.forEach(o => LIVE.out.push(Object.assign({board: owner}, o)));
+  LIVE.nbT = createNotebook($('#tb-host'), {readOnly: !staff, tpl: tplDefault, onOps: ops => queue(c.teacher, ops)});
+  LIVE.nbT.mount([{tpl: tplDefault}]);
+  LIVE.boardOwner = staff ? '' : Auth.user.u;
+  LIVE.nbS = createNotebook($('#sb-host'), {tpl: tplDefault, onOps: ops => LIVE.boardOwner && queue(LIVE.boardOwner, ops)});
+  LIVE.nbS.mount([{tpl: tplDefault}]);
+  if (staff) { $('#sb-title').textContent = '📓 دفتر الطالب'; $('#sb-note').textContent = 'اختر طالبًا من القائمة لفتح دفتره والكتابة معه'; }
+
+  if (staff) { $('#tb-tools').innerHTML = notebookToolbar(null, {id: 'tb', noExport: true}); wireNotebookToolbar($('#tb-tools'), LIVE.nbT); }
+  $('#sb-tools').innerHTML = notebookToolbar(null, {id: 'sb'});
+  wireNotebookToolbar($('#sb-tools'), LIVE.nbS);
+
+  /* ---------------- controls ---------------- */
+  $('#lv-split').onclick = () => {
+    const w = $('.live-wrap'), n = w.dataset.split === 'side' ? 'stack' : 'side';
+    w.dataset.split = n; Store.lset('live-split', n);
+    $('#lv-split').textContent = n === 'side' ? '⬍ فوق/تحت' : '⬌ جنبًا لجنب';
+  };
+  $$('[data-fs]').forEach(b => b.onclick = () => {
+    const pane = b.closest('.live-pane');
+    pane.classList.toggle('solo');
+    $$('.live-pane').forEach(p => { if (p !== pane) p.hidden = pane.classList.contains('solo'); });
+  });
+  const hb = $('#lv-hand'); if (hb) hb.onclick = () => { LIVE.hand = !LIVE.hand; hb.classList.toggle('primary', LIVE.hand); hb.textContent = LIVE.hand ? '✋ يدك مرفوعة' : '✋ رفع اليد'; };
+  $('#lv-cam').onclick = () => { const p = $('#lv-cam-panel'); p.hidden = !p.hidden; if (!p.hidden) listCams(); };
+  $('#lv-meet').onclick = () => toggleMeet(c);
+  $('#lm-close').onclick = () => toggleMeet(c, true);
+  const ab = $('#lv-att');
+  if (ab) ab.onclick = () => {
+    const date = new Date().toISOString().slice(0, 10);
+    const roster = classRoster(cid), rec = {};
+    roster.forEach(e => { rec[e.student] = LIVE.presence[e.student] ? 'present' : 'absent'; });
+    const all = attendance(); const ex = all.find(a => a.classId === cid && a.date === date);
+    if (ex) ex.records = Object.assign({}, ex.records, rec); else all.push({id: uid(), classId: cid, date, records: rec, by: Auth.user.u});
+    saveAttendance(all);
+    toast('سُجّل حضور ' + num(Object.values(rec).filter(v => v === 'present').length) + ' من ' + num(roster.length), 'ok');
+  };
+
+  /* ---------------- camera ---------------- */
+  async function listCams() {
+    try {
+      await navigator.mediaDevices.getUserMedia({video: true}).then(s => s.getTracks().forEach(t => t.stop())).catch(() => {});
+      const devs = (await navigator.mediaDevices.enumerateDevices()).filter(d => d.kind === 'videoinput');
+      $('#cam-dev').innerHTML = devs.length ? devs.map((d, i) => `<option value="${esc(d.deviceId)}">${esc(d.label || 'كاميرا ' + num(i + 1))}</option>`).join('')
+        : '<option value="">— لا توجد كاميرات —</option>';
+    } catch (e) { $('#cam-dev').innerHTML = '<option value="">تعذّر الوصول للكاميرات</option>'; }
+  }
+  $('#cam-start').onclick = async () => {
+    try {
+      if (LIVE.stream) LIVE.stream.getTracks().forEach(t => t.stop());
+      const id = $('#cam-dev').value;
+      LIVE.stream = await navigator.mediaDevices.getUserMedia({video: id ? {deviceId: {exact: id}} : true, audio: false});
+      const v = $('#cam-view'); v.srcObject = LIVE.stream; v.muted = true; v.playsInline = true; await v.play().catch(() => {});
+      toast('الكاميرا تعمل', 'ok');
+    } catch (e) { toast('تعذّر تشغيل الكاميرا — تحقّق من الأذونات', 'err'); }
+  };
+  $('#cam-stop').onclick = () => { if (LIVE.stream) { LIVE.stream.getTracks().forEach(t => t.stop()); LIVE.stream = null; } $('#cam-view').srcObject = null; };
+  $('#cam-ip').onclick = () => {
+    const u = $('#cam-url').value.trim(); const img = $('#cam-ipview');
+    if (!u) return toast('أدخل رابط بث الكاميرا', 'err');
+    img.hidden = false; img.src = u; img.onerror = () => toast('تعذّر عرض بث الكاميرا — تحقّق من الرابط والشبكة', 'err');
+  };
+
+  /* ---------------- sync loop ---------------- */
+  const routeOps = (owner, ops) => {
+    const mine = ops.filter(o => o.by !== Auth.user.u);      // my own strokes are already drawn
+    if (!mine.length) return;
+    if (owner === c.teacher) LIVE.nbT.applyRemote(mine);
+    else if (owner === LIVE.boardOwner) LIVE.nbS.applyRemote(mine);
+  };
+  async function tick() {
+    if (!LIVE) return;
+    const payload = {class: cid, since: LIVE.since, presence: {hand: LIVE.hand, cam: !!LIVE.stream}, ops: LIVE.out.splice(0, 200)};
+    if (LIVE.staff && LIVE.boardOwner) payload.focus = LIVE.boardOwner;
+    try {
+      const r = await api('/api/room', 'POST', payload);
+      if (!LIVE) return;
+      LIVE.presence = r.presence || {};
+      for (const owner in (r.boards || {})) {
+        LIVE.since[owner] = r.boards[owner].seq;
+        routeOps(owner, r.boards[owner].ops || []);
+      }
+      if (!LIVE.staff && r.focus === Auth.user.u) $('#sb-note').innerHTML = '<span class="watching">👁 المعلّم يتابع دفترك الآن</span>';
+      else if (!LIVE.staff) $('#sb-note').textContent = '';
+      paintPeople();
+    } catch (e) { /* keep the loop alive through transient errors */ }
+  }
+  function paintPeople() {
+    const p = LIVE.presence, keys = Object.keys(p);
+    $('#lv-count').textContent = '👥 ' + num(keys.length);
+    $('#lv-n').textContent = num(keys.length);
+    const roster = classRoster(cid);
+    const rows = keys.map(u => ({u, ...p[u]})).sort((a, b) => (a.r === 'معلم' ? -1 : 1) - (b.r === 'معلم' ? -1 : 1));
+    const absent = roster.filter(e => !p[e.student]);
+    $('#lv-people').innerHTML = rows.map(x => `
+      <div class="person ${x.u === LIVE.boardOwner ? 'sel' : ''}" ${LIVE.staff && x.r === 'طالب' ? `data-open-board="${esc(x.u)}"` : ''}>
+        <span class="um-avatar" style="width:30px;height:30px;font-size:.72rem">${esc(initials(x.n))}</span>
+        <div style="flex:1;min-width:0"><div class="p-name">${esc(x.n)}</div>
+          <div class="p-role">${roleEmoji(x.r)} ${esc(x.r)}</div></div>
+        ${x.hand ? '<span class="p-hand">✋</span>' : ''}${x.cam ? '<span title="كاميرا">📹</span>' : ''}
+        <span class="p-on"></span></div>`).join('')
+      + (absent.length ? `<div class="ls-h" style="margin-top:8px">غائبون (${num(absent.length)})</div>` +
+        absent.map(e => `<div class="person off"><span class="um-avatar" style="width:30px;height:30px;font-size:.72rem;background:#cbd5e1">${esc(initials(e.studentName))}</span>
+          <div style="flex:1"><div class="p-name">${esc(e.studentName)}</div><div class="p-role">غير متصل</div></div></div>`).join('') : '');
+    $$('[data-open-board]').forEach(el => el.onclick = () => openStudentBoard(el.dataset.openBoard));
+  }
+  function openStudentBoard(u) {
+    LIVE.boardOwner = u; LIVE.since[u] = 0;                  // replay their board from the start
+    const p = LIVE.presence[u] || {};
+    $('#sb-title').textContent = '📓 دفتر: ' + (p.n || u);
+    $('#sb-note').innerHTML = '<span class="watching">✍️ يمكنك الكتابة معه مباشرة</span>';
+    LIVE.nbS.mount([{tpl: tplDefault}]);
+    paintPeople();
+  }
+
+  // session timer
+  const t0 = Date.now();
+  LIVE.timer = setInterval(() => {
+    if (!LIVE) return;
+    const s = Math.floor((Date.now() - t0) / 1000);
+    const el = $('#lv-timer'); if (el) el.textContent = num(String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0'));
+    if (s % 2 === 0) tick();
+  }, 1000);
+  tick();
+  PAGE_CLEANUP = liveTeardown;
+};
+function toggleMeet(c, forceClose) {
+  const wrap = $('#lv-meet-wrap'), frame = $('#lm-frame');
+  if (forceClose || !wrap.hidden) { wrap.hidden = true; frame.innerHTML = ''; return; }
+  const host = Store.get('meetHost', 'meet.jit.si');
+  const room = 'OLS-' + String(c.id).replace(/[^\w]/g, '') + '-' + c.grade;
+  const url = `https://${host}/${room}#userInfo.displayName=%22${encodeURIComponent(Auth.user.name)}%22&config.prejoinPageEnabled=false`;
+  frame.innerHTML = `<iframe src="${esc(url)}" allow="camera; microphone; fullscreen; display-capture; autoplay" allowfullscreen></iframe>
+    <p class="muted" style="font-size:.72rem;margin:6px 0 0">غرفة مرئية مشفّرة عبر Jitsi — تدعم الصوت والفيديو ومشاركة الشاشة. يمكن للمدير تغيير الخادم من الإعدادات.</p>`;
+  wrap.hidden = false;
+}
+
 
 /* ---- Users ---- */
 PAGES.users = function () {

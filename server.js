@@ -22,7 +22,7 @@ const ROOT = __dirname;
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 /* must match APP_VERSION in app.js — check what's live at /api/version */
-const APP_VERSION = 'v1.8 · 2026-07-15';
+const APP_VERSION = 'v2.0 · 2026-07-16';
 const STARTED = new Date().toISOString();
 
 function pickDataDir() {
@@ -35,6 +35,7 @@ const DB_FILE = path.join(DATA_DIR, 'ols.json');
 const STATE_FILE = path.join(DATA_DIR, 'state.json');
 const BLOB_DIR = path.join(DATA_DIR, 'blobs');
 const BLOBMETA_FILE = path.join(DATA_DIR, 'blobmeta.json');
+const ROOMS_FILE = path.join(DATA_DIR, 'rooms.json');       // live-class presence + board ops
 
 /* ------------------------------ data store ------------------------------- */
 function loadJson(f, def) { try { return JSON.parse(fs.readFileSync(f, 'utf8')); } catch (e) { return def; } }
@@ -319,6 +320,62 @@ async function handleApi(req, res, urlPath, query) {
     const out = {};
     for (const k in meta) if (Math.abs(meta[k]) > since) out[k] = meta[k];
     return json(res, 200, {ok: true, now: Date.now(), keys: out});
+  }
+
+  // ---- live classroom rooms (presence + collaborative board ops) ----
+  // Fast-poll design (not SSE/WebSocket) because shared hosts buffer or kill
+  // long-lived responses. Payloads stay small: only ops newer than `since`.
+  if (urlPath === '/api/room') {
+    if (!me) return json(res, 401, {error: 'غير مسجّل الدخول.'});
+    const cid = String(query.class || body.class || '').slice(0, 64);
+    if (!cid) return json(res, 400, {error: 'معرّف الصف مطلوب.'});
+    const rooms = loadJson(ROOMS_FILE, {});
+    const room = rooms[cid] || (rooms[cid] = {presence: {}, boards: {}, session: {}, focus: '', seq: 0});
+    const now = Date.now();
+
+    if (method === 'POST') {
+      // presence heartbeat
+      const p = body.presence || {};
+      room.presence[me.u] = {n: me.name, r: me.role, t: now,
+        hand: !!p.hand, cam: !!p.cam, mic: !!p.mic, ready: !!p.ready};
+      // board ops: [{board:<ownerU>, ...op}]
+      if (Array.isArray(body.ops)) {
+        for (const o of body.ops.slice(0, 400)) {
+          if (!o || !o.board) continue;
+          const owner = String(o.board).slice(0, 64);
+          // a student may only write to their own board; teacher/admin write anywhere
+          const isStaff = me.role === ADMIN_ROLE || me.role === 'معلم';
+          if (!isStaff && owner !== me.u) continue;
+          const b = room.boards[owner] || (room.boards[owner] = {seq: 0, ops: []});
+          b.seq++; room.seq++;
+          const rec = Object.assign({}, o, {i: b.seq, by: me.u, t: now});
+          delete rec.board;
+          b.ops.push(rec);
+          if (b.ops.length > 5000) b.ops.splice(0, b.ops.length - 5000);   // bound growth
+        }
+      }
+      if (body.session && (me.role === ADMIN_ROLE || me.role === 'معلم')) {
+        if (body.session.start) room.session = {active: true, startedAt: now, by: me.u};
+        if (body.session.end) room.session = {active: false, endedAt: now, by: me.u};
+      }
+      if (typeof body.focus === 'string' && (me.role === ADMIN_ROLE || me.role === 'معلم')) room.focus = body.focus;
+      if (body.leave) delete room.presence[me.u];
+      saveJson(ROOMS_FILE, rooms);
+      // fall through so one request both sends and receives (halves traffic)
+    }
+
+    // presence (expiring) + board ops since the caller's cursor
+    for (const u in room.presence) if (now - (room.presence[u].t || 0) > 25000) delete room.presence[u];
+    let since = {};
+    try { const raw = method === 'POST' ? body.since : query.since; since = typeof raw === 'string' ? JSON.parse(raw) : (raw || {}); } catch (e) {}
+    const boards = {};
+    for (const owner in room.boards) {
+      const b = room.boards[owner];
+      const from = Number(since[owner]) || 0;
+      const ops = from >= b.seq ? [] : b.ops.filter(o => o.i > from);
+      boards[owner] = {seq: b.seq, ops};
+    }
+    return json(res, 200, {ok: true, now, presence: room.presence, boards, session: room.session || {}, focus: room.focus || ''});
   }
 
   // ---- AI assistant proxy (optional) ----
