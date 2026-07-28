@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v2.2 · 2026-07-27';
+const APP_VERSION = 'v2.3 · 2026-07-27';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -376,6 +376,7 @@ PAGES.dashboard = function () {
 
 /* ---- Curriculum (book reader) ---- */
 PAGES.curriculum = function (params) {
+  params = params || [];
   const levelId = params[0];
   if (!levelId) {
     crumb('المناهج', 'اختر المستوى الدراسي');
@@ -958,16 +959,59 @@ function drawTraceText(ctx, tr) {
   ctx.save();
   ctx.direction = ar ? 'rtl' : 'ltr'; ctx.textAlign = ar ? 'right' : 'left'; ctx.textBaseline = 'alphabetic';
   ctx.font = `${size}px Cairo, Arial, sans-serif`;
+  const x = ar ? PG_W - PG_M : PG_M;
   let y = PG_M + size;
   for (let r = 0; r < (tr.rep || 1) && y < PG_H - PG_M; r++) {
-    hLine(ctx, y, '#e6edf3', 1.4);
-    ctx.strokeStyle = '#9aa7b4'; ctx.lineWidth = Math.max(1.2, size / 48);
-    ctx.setLineDash(tr.style === 'outline' ? [] : [2, Math.max(4, size / 11)]);
-    ctx.strokeText(tr.text, ar ? PG_W - PG_M : PG_M, y);
-    ctx.setLineDash([]);
-    y += size * 1.5 + 12;
+    // writing rails so the child keeps the letter height
+    hLine(ctx, y, '#dfe8ef', 1.5);
+    hLine(ctx, y - size * 0.62, '#eef3f7', 1.2, [5, 7]);
+    if (tr.style === 'solid') {                       // light model to write over
+      ctx.fillStyle = 'rgba(120,140,155,.32)'; ctx.fillText(tr.text, x, y);
+    } else {
+      ctx.strokeStyle = '#93a3b1'; ctx.lineWidth = Math.max(1.2, size / 48);
+      ctx.setLineDash(tr.style === 'outline' ? [] : [2, Math.max(4, size / 11)]);
+      ctx.strokeText(tr.text, x, y);
+      ctx.setLineDash([]);
+    }
+    y += size * 1.55 + 14;
   }
   ctx.restore();
+}
+/* reusable "type text → it appears on the sheet to trace" panel.
+   Because it emits a normal op, whatever the teacher types also appears on the
+   student's board live in the classroom. */
+function tracePanelHtml() {
+  return `<div class="board-tools trace-panel" data-trace>
+    <button class="btn sm gold trace-toggle" type="button">✍️ صندوق الكتابة والتتبّع</button>
+    <div class="trace-fields">
+      <input class="tr-text" placeholder="اكتب حرفًا أو كلمة أو جملة… ثم اضغط تطبيق">
+      <label class="bt-size">الحجم <input class="tr-size" type="range" min="30" max="220" value="90"><b class="tr-sizeval">٩٠</b></label>
+      <label class="bt-size">التكرار <input class="tr-rep" type="number" min="1" max="10" value="3" style="width:52px"></label>
+      <div class="bt-group">
+        <button class="tool-btn on" data-ts="dotted" title="منقّط للتتبّع">⁙</button>
+        <button class="tool-btn" data-ts="outline" title="مفرّغ">▢</button>
+        <button class="tool-btn" data-ts="solid" title="نموذج فاتح">▨</button>
+      </div>
+      <button class="btn sm primary tr-apply">تطبيق</button>
+      <button class="btn sm tr-clear">إزالة</button>
+    </div>
+  </div>`;
+}
+function wireTracePanel(root, nb) {
+  const p = $('[data-trace]', root); if (!p) return;
+  let style = 'dotted';
+  $('.trace-toggle', p).onclick = () => p.classList.toggle('open');
+  $$('[data-ts]', p).forEach(b => b.onclick = () => { style = b.dataset.ts; $$('[data-ts]', p).forEach(x => x.classList.toggle('on', x === b)); });
+  const sz = $('.tr-size', p);
+  sz.oninput = () => { $('.tr-sizeval', p).textContent = num(sz.value); };
+  const apply = () => {
+    const text = $('.tr-text', p).value.trim();
+    if (!text) return toast('اكتب النص أولًا', 'err');
+    nb.setTrace(nb.currentPage(), {text, size: +sz.value, rep: clamp(+$('.tr-rep', p).value || 1, 1, 10), style});
+  };
+  $('.tr-apply', p).onclick = apply;
+  $('.tr-text', p).onkeydown = e => { if (e.key === 'Enter') apply(); };
+  $('.tr-clear', p).onclick = () => { $('.tr-text', p).value = ''; nb.setTrace(nb.currentPage(), {text: ''}); };
 }
 
 function createNotebook(host, opts) {
@@ -1198,26 +1242,13 @@ PAGES.board = function () {
     <div class="page-head"><div><h2>🎨 لوحة التدريب والكتابة</h2><p>دفتر A4 متعدّد الصفحات — اكتب وارسم ولوّن، وبدّل نوع التسطير لكل صفحة.</p></div>
       <a class="btn" href="#/exercises">◀ التمارين</a></div>
     ${notebookToolbar(null, {id: 'bd'})}
-    <div class="board-tools trace-panel">
-      <b style="color:var(--teal-ink)">✍️ تتبّع الحروف والكلمات المنقّطة</b>
-      <input id="tr-text" placeholder="اكتب الحرف أو الكلمة أو الجملة…" style="flex:1;min-width:180px;padding:.55em .8em;border:1px solid var(--line);border-radius:10px">
-      <label class="bt-size">الخط <input id="tr-size" type="range" min="40" max="180" value="90"></label>
-      <label class="bt-size">التكرار <input id="tr-rep" type="number" min="1" max="10" value="3" style="width:54px"></label>
-      <div class="bt-group"><button class="tool-btn on" data-ts="dotted" title="منقّط">⁙</button><button class="tool-btn" data-ts="outline" title="مفرّغ">▢</button></div>
-      <button class="btn sm primary" id="tr-apply">تطبيق</button>
-      <button class="btn sm" id="tr-clear">إزالة</button>
-    </div>
+    ${tracePanelHtml()}
     <div id="nb-host" class="nb-host"></div>`;
   const nb = createNotebook($('#nb-host'), {tpl: Store.lget('board-tpl', 'arabic')});
   nb.mount(Store.lget('board-pages', null));
   wireNotebookToolbar($('#view'), nb);
+  wireTracePanel($('#view'), nb);
   $$('[data-tpl]').forEach(b => b.classList.toggle('on', b.dataset.tpl === Store.lget('board-tpl', 'arabic')));
-  let style = 'dotted';
-  $$('[data-ts]').forEach(b => b.onclick = () => { style = b.dataset.ts; $$('[data-ts]').forEach(x => x.classList.toggle('on', x === b)); });
-  const apply = () => nb.setTrace(nb.currentPage(), {text: $('#tr-text').value.trim(), size: +$('#tr-size').value, rep: clamp(+$('#tr-rep').value || 1, 1, 10), style});
-  $('#tr-apply').onclick = apply;
-  $('#tr-text').onkeydown = e => { if (e.key === 'Enter') apply(); };
-  $('#tr-clear').onclick = () => { $('#tr-text').value = ''; nb.setTrace(nb.currentPage(), {text: ''}); };
   if (document.fonts && document.fonts.ready) document.fonts.ready.then(() => nb.applyRemote([]));
 };
 
@@ -1504,6 +1535,7 @@ async function solveMath(q, imgData) {
 
 /* ---- Messages / chat ---- */
 PAGES.messages = function (params) {
+  params = params || [];
   crumb('المحادثات', 'تواصل مباشر');
   $('#view').innerHTML = `<div class="page-head"><div><h2>💬 المحادثات</h2><p>تواصل بين المعلمين والطلبة والإدارة${Auth.isTeacher ? ' — طلابك في مستوياتك المخصّصة' : ''}.</p></div>
     <a class="btn" href="#/">◀ الرئيسية</a></div>
@@ -1774,6 +1806,7 @@ function attendanceRate(cid, studentU) {
 
 /* ------------------------------- pages ---------------------------------- */
 PAGES.classes = function (params) {
+  params = params || [];                       // also called internally with no args
   crumb('الصفوف الدراسية', 'المستوى ← المادة ← المعلّم');
   const tab = params[0] || Store.lget('cls-tab', Auth.isStudent ? 'browse' : 'mine');
   Store.lset('cls-tab', tab);
@@ -1986,7 +2019,7 @@ function renderRoster(host, c, staff) {
       ${roster.map(e => {
         const at = attendanceRate(c.id, e.student), r = classResult(c.id, e.student);
         const f = fees().find(x => x.classId === c.id && x.student === e.student);
-        return `<tr><td><b>${esc(e.studentName)}</b></td>
+        return `<tr><td><a class="lnk" href="#/profile/${esc(e.student)}"><b>${esc(e.studentName)}</b> 🪪</a></td>
           <td>${at ? num(at.rate) + '%' : '—'}</td>
           <td>${r ? `<b>${num(r.pct)}%</b> · ${esc(r.letter)}` : '—'}</td>
           <td>${f ? (f.status === 'paid' ? '<span class="pill teal">مسدّدة</span>' : f.status === 'waived' ? '<span class="pill">معفاة</span>' : '<span class="pill gold">غير مسدّدة</span>') : (Number(c.fee) > 0 ? '—' : 'مجاني')}</td></tr>`;
@@ -2071,7 +2104,9 @@ function renderGrades(host, c, roster, staff) {
 }
 function renderCerts(host, c, roster, staff) {
   const targets = staff ? roster : roster.filter(e => e.student === Auth.user.u);
-  host.innerHTML = `<p class="muted">تُصدر الشهادة بناءً على التقييم المرجّح للمادة${staff ? ' — يعتمدها المعلّم أو المدير.' : '.'}</p>
+  host.innerHTML = `<div class="row" style="justify-content:space-between;align-items:flex-start">
+      <p class="muted" style="flex:1">تُصدر الشهادة بناءً على التقييم المرجّح للمادة${staff ? ' — يعتمدها المعلّم أو المدير.' : '.'}</p>
+      <a class="btn sm" href="#/verify">🔎 تحقّق من شهادة</a></div>
     ${targets.length ? `<table class="tbl"><tr><th>الطالب</th><th>النتيجة</th><th>التقدير</th><th>الحضور</th><th></th></tr>
       ${targets.map(e => { const r = classResult(c.id, e.student), at = attendanceRate(c.id, e.student);
         const cert = certificates().find(x => x.classId === c.id && x.student === e.student);
@@ -2085,41 +2120,11 @@ function renderCerts(host, c, roster, staff) {
     const e = roster.find(x => x.student === b.dataset.cissue); const r = classResult(c.id, e.student);
     const cs = certificates();
     const cert = {id: uid(), serial: 'OLS-' + String(Date.now()).slice(-8), classId: c.id, student: e.student,
-      studentName: e.studentName, subject: c.subject, grade: c.grade, percent: r.pct, letter: r.letter,
+      studentName: e.studentName, subject: c.subject, grade: c.grade, className: c.title || '', percent: r.pct, letter: r.letter,
       teacherName: c.teacherName, issued: Date.now(), issuedBy: Auth.user.name};
     cs.push(cert); saveCertificates(cs); toast('تم إصدار الشهادة 🏅', 'ok'); renderCerts(host, c, roster, staff);
   });
   $$('[data-cview]', host).forEach(b => b.onclick = () => showCertificate(b.dataset.cview));
-}
-function showCertificate(id) {
-  const ct = certificates().find(x => x.id === id); if (!ct) return;
-  const html = `<div class="certificate" id="cert-sheet">
-      <div class="cert-border">
-        <img src="assets/logo.svg" class="cert-logo" alt="OLS">
-        <div class="cert-h1">شهادة إتمام</div>
-        <div class="cert-sub">نظام التعلّم العُماني — OLS</div>
-        <p class="cert-txt">تشهد إدارة النظام بأن الطالب/ة</p>
-        <div class="cert-name">${esc(ct.studentName)}</div>
-        <p class="cert-txt">قد أتمّ بنجاح متطلبات مادة</p>
-        <div class="cert-subject">${subjIcon(ct.subject)} ${esc(ct.subject)} — ${esc(gradeName(ct.grade))}</div>
-        <div class="cert-score"><span>النتيجة: <b>${num(ct.percent)}%</b></span><span>التقدير: <b>${esc(ct.letter)}</b></span></div>
-        <div class="cert-foot">
-          <div><div class="cert-line"></div>المعلّم: ${esc(ct.teacherName || '—')}</div>
-          <div><div class="cert-line"></div>الاعتماد: ${esc(ct.issuedBy)}</div>
-        </div>
-        <div class="cert-serial">رقم الشهادة: ${esc(ct.serial)} · التاريخ: ${num(arDate(ct.issued))}</div>
-      </div></div>`;
-  const m = modal('🏅 الشهادة', html, `<button class="btn primary" id="cert-print">🖨 طباعة / حفظ PDF</button>`, {wide: true});
-  $('#cert-print', m.el).onclick = () => {
-    const w = window.open('');
-    if (!w) return toast('اسمح بالنوافذ المنبثقة للطباعة', 'err');
-    w.document.write(`<html dir="rtl"><head><meta charset="utf-8"><title>شهادة</title>
-      <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;700;800&display=swap" rel="stylesheet">
-      <link rel="stylesheet" href="${location.origin}/styles.css"></head>
-      <body style="font-family:Cairo,sans-serif;padding:0;margin:0">${$('#cert-sheet', m.el).outerHTML}
-      <script>setTimeout(()=>print(),600)<\/script></body></html>`);
-    w.document.close();
-  };
 }
 /* ---- fees ledger (records only — no card processing) ---- */
 function renderFees(host) {
@@ -2192,6 +2197,7 @@ function liveTeardown() {
   setNavCollapsed(Store.lget('nav-collapsed', false), false);   // restore the user's own preference
 }
 PAGES.live = function (params) {
+  params = params || [];
   const cid = params[0], c = classById(cid);
   if (!c) { $('#view').innerHTML = `<div class="empty"><div class="big">🏫</div>الصف غير موجود.<br><a class="btn" href="#/classes" style="margin-top:10px">◀ الصفوف</a></div>`; return; }
   if (!canJoinClass(c)) { $('#view').innerHTML = `<div class="empty"><div class="big">🔒</div>لست مسجّلًا في هذا الصف.<br><a class="btn" href="#/classes" style="margin-top:10px">◀ الصفوف</a></div>`; return; }
@@ -2286,9 +2292,15 @@ PAGES.live = function (params) {
   LIVE.nbS.mount([{tpl: tplDefault}]);
   if (staff) { $('#sb-title').textContent = '📓 دفتر الطالب'; $('#sb-note').textContent = 'اختر طالبًا من القائمة لفتح دفتره والكتابة معه'; }
 
-  if (staff) { $('#tb-tools').innerHTML = notebookToolbar(null, {id: 'tb', noExport: true}); wireNotebookToolbar($('#tb-tools'), LIVE.nbT); }
-  $('#sb-tools').innerHTML = notebookToolbar(null, {id: 'sb'});
+  if (staff) {
+    $('#tb-tools').innerHTML = notebookToolbar(null, {id: 'tb', noExport: true}) + tracePanelHtml();
+    wireNotebookToolbar($('#tb-tools'), LIVE.nbT); wireTracePanel($('#tb-tools'), LIVE.nbT);
+  }
+  // the student notebook gets the trace box too — the teacher can type a model
+  // straight onto the child's page, and the child sees it instantly
+  $('#sb-tools').innerHTML = notebookToolbar(null, {id: 'sb'}) + tracePanelHtml();
   wireNotebookToolbar($('#sb-tools'), LIVE.nbS);
+  wireTracePanel($('#sb-tools'), LIVE.nbS);
 
   /* ---------------- controls ---------------- */
   const setSplit = n => {
@@ -2481,6 +2493,396 @@ function toggleMeet(c, forceClose) {
 }
 
 
+/* ========================= PROFILES & DOCUMENTS ==========================
+   One complete record per person: identity + photo, enrolments, finances,
+   scanned documents, assessment results, attendance, achievements and
+   certificates. Visible to the person themselves, their teacher, their
+   guardian, and the administrator.
+   ======================================================================== */
+function profiles() { return Store.get('profiles', {}); }
+function profileOf(u) { return profiles()[u] || {}; }
+function saveProfile(u, patch) { const all = profiles(); all[u] = Object.assign({}, all[u] || {}, patch); Store.set('profiles', all); }
+function documents() { return Store.get('documents', []); }
+function saveDocuments(v) { Store.set('documents', v); }
+const docsOf = u => documents().filter(d => d.owner === u);
+
+function dirUser(u) { return DIRECTORY.find(x => x.u === u) || (Auth.user && Auth.user.u === u ? Auth.user : null); }
+function canViewProfile(u) {
+  if (!Auth.user) return false;
+  if (u === Auth.user.u || Auth.isAdmin) return true;
+  if (Auth.isTeacher) return classes().some(c => c.teacher === Auth.user.u && classRoster(c.id).some(e => e.student === u));
+  if (Auth.isParent) return (meDir().child || '') === u;
+  return false;
+}
+const canEditProfile = u => Auth.user && (u === Auth.user.u || Auth.isAdmin);
+
+/* ---- financial summary for a student ---- */
+function financeOf(u) {
+  const list = fees().filter(f => f.student === u);
+  const billed = list.reduce((s, f) => s + Number(f.amount || 0), 0);
+  const paid = list.filter(f => f.status === 'paid').reduce((s, f) => s + Number(f.amount || 0), 0);
+  const waived = list.filter(f => f.status === 'waived').reduce((s, f) => s + Number(f.amount || 0), 0);
+  return {list, billed, paid, waived, balance: billed - paid - waived};
+}
+/* ---- everything assessed for a student, from tests and from class work ---- */
+function assessmentsOf(u) {
+  const fromTests = results().filter(r => r.user === u).map(r => ({
+    when: r.date, title: r.title, kind: r.kind === 'exercise' ? 'تمرين' : 'اختبار تفاعلي',
+    subject: r.subject || '—', score: r.score, total: r.total, pct: Math.round(r.score / r.total * 100)}));
+  const fromClass = gradeItems().filter(g => g.student === u).map(g => {
+    const c = classById(g.classId) || {};
+    return {when: g.date, title: g.title, kind: g.kind, subject: c.subject || '—',
+      score: g.score, total: g.total, pct: Math.round(g.score / g.total * 100)};
+  });
+  return fromTests.concat(fromClass).sort((a, b) => b.when - a.when);
+}
+function overallOf(u) {
+  const a = assessmentsOf(u);
+  const avg = a.length ? Math.round(a.reduce((s, x) => s + x.pct, 0) / a.length) : null;
+  const enrol = enrolments().filter(e => e.student === u && e.status === 'active');
+  let pres = 0, tot = 0;
+  enrol.forEach(e => { const at = attendanceRate(e.classId, u); if (at) { pres += at.present; tot += at.total; } });
+  const att = tot ? Math.round(pres / tot * 100) : null;
+  return {avg, att, classes: enrol.length, tests: a.length, certs: certificates().filter(c => c.student === u).length};
+}
+function achievementsOf(u) {
+  const o = overallOf(u), out = [];
+  if (o.avg != null && o.avg >= 90) out.push({e: '🏅', t: 'متفوّق', d: 'متوسط ٩٠٪ فأعلى'});
+  else if (o.avg != null && o.avg >= 80) out.push({e: '🎖️', t: 'متميّز', d: 'متوسط ٨٠٪ فأعلى'});
+  if (o.att === 100) out.push({e: '⭐', t: 'حضور مثالي', d: 'لم يتغيّب أبدًا'});
+  else if (o.att != null && o.att >= 90) out.push({e: '📚', t: 'مواظب', d: 'حضور ٩٠٪ فأعلى'});
+  if (o.tests >= 10) out.push({e: '🎯', t: 'مثابر', d: num(o.tests) + ' نشاطًا مقيّمًا'});
+  else if (o.tests >= 5) out.push({e: '✏️', t: 'نشِط', d: num(o.tests) + ' أنشطة'});
+  if (o.certs) out.push({e: '🏆', t: 'حاصل على شهادات', d: num(o.certs) + ' شهادة'});
+  if (o.classes >= 3) out.push({e: '🎓', t: 'متعدّد المواد', d: num(o.classes) + ' صفوف'});
+  return out;
+}
+
+PAGES.profile = function (params) {
+  params = params || [];
+  const u = params[0] || Auth.user.u;
+  if (!canViewProfile(u)) { $('#view').innerHTML = `<div class="empty"><div class="big">🔒</div>لا تملك صلاحية عرض هذا الملف.</div>`; return; }
+  const d = dirUser(u) || {u, name: u, role: '—', levels: []};
+  const p = profileOf(u), o = overallOf(u), fin = financeOf(u);
+  const isStudent = d.role === 'طالب';
+  crumb('الملف الشخصي', d.name);
+  const tab = Store.lget('prof-tab', 'overview');
+  const tabs = [{k: 'overview', t: '📋 نظرة عامة'}, {k: 'personal', t: '🪪 البيانات'},
+    {k: 'classes', t: '🏫 الصفوف'}, {k: 'results', t: '📊 النتائج'},
+    {k: 'docs', t: '📎 المستندات'}, {k: 'certs', t: '🏅 الشهادات'}];
+  if (isStudent) tabs.splice(3, 0, {k: 'finance', t: '💳 المالية'});
+  $('#view').innerHTML = `
+    <div class="profile-head">
+      <div class="ph-photo">
+        ${p.photo ? `<img src="${fileUrl(p.photo, 'photo')}" alt="">` : `<span>${esc(initials(d.name))}</span>`}
+        ${canEditProfile(u) ? `<button class="ph-cam" id="pf-photo" title="تغيير الصورة">📷</button><input type="file" id="pf-photo-file" accept="image/*" hidden>` : ''}
+      </div>
+      <div class="ph-info">
+        <h2>${esc(d.name)}</h2>
+        <div class="ph-sub">${roleEmoji(d.role)} ${esc(d.role)} · @${esc(u)}
+          ${(d.levels && d.levels.length) ? ' · ' + d.levels.map(g => g === 0 ? 'روضة' : gradeName(g)).join('، ') : ''}</div>
+        <div class="ph-stats">
+          <div class="phs"><b>${o.avg == null ? '—' : num(o.avg) + '%'}</b><span>الأداء العام</span></div>
+          <div class="phs"><b>${o.att == null ? '—' : num(o.att) + '%'}</b><span>الحضور</span></div>
+          <div class="phs"><b>${num(o.classes)}</b><span>الصفوف</span></div>
+          <div class="phs"><b>${num(o.certs)}</b><span>الشهادات</span></div>
+          ${isStudent ? `<div class="phs ${fin.balance > 0 ? 'due' : ''}"><b>${OMR(fin.balance)}</b><span>الرصيد المستحق</span></div>` : ''}
+        </div>
+      </div>
+    </div>
+    <div class="chip-row">${tabs.map(t => `<button class="tab-chip ${t.k === tab ? 'active' : ''}" data-ptab="${t.k}">${t.t}</button>`).join('')}</div>
+    <div id="pf-body"></div>`;
+  $$('[data-ptab]').forEach(b => b.onclick = () => { Store.lset('prof-tab', b.dataset.ptab); PAGES.profile([u]); });
+  const ph = $('#pf-photo');
+  if (ph) {
+    ph.onclick = () => $('#pf-photo-file').click();
+    $('#pf-photo-file').onchange = async e => {
+      const f = e.target.files[0]; if (!f) return;
+      if (!checkUploadSize(f, false)) return;
+      toast('… جارٍ رفع الصورة');
+      const dataUrl = await fileToDataURL(f); const key = 'photo-' + u;
+      try { await uploadBlob(key, dataUrl); } catch (er) { return toast('تعذّر الرفع', 'err'); }
+      saveProfile(u, {photo: key}); toast('تم تحديث الصورة', 'ok'); PAGES.profile([u]);
+    };
+  }
+  const body = $('#pf-body');
+  ({overview: pfOverview, personal: pfPersonal, classes: pfClasses, finance: pfFinance,
+    results: pfResults, docs: pfDocs, certs: pfCerts}[tab] || pfOverview)(body, u, d);
+};
+function pfOverview(host, u, d) {
+  const o = overallOf(u), ach = achievementsOf(u), a = assessmentsOf(u).slice(0, 6);
+  const bySub = {};
+  assessmentsOf(u).forEach(x => (bySub[x.subject] = bySub[x.subject] || []).push(x.pct));
+  const subs = Object.keys(bySub).map(s => ({s, v: Math.round(bySub[s].reduce((x, y) => x + y, 0) / bySub[s].length)}));
+  host.innerHTML = `
+    <div class="grid g-2">
+      <div class="card"><div class="section-title" style="margin-top:0">🏆 الإنجازات والأوسمة</div>
+        ${ach.length ? `<div class="badge-row">${ach.map(b => `<div class="ach"><span>${b.e}</span><b>${esc(b.t)}</b><i>${esc(b.d)}</i></div>`).join('')}</div>`
+          : `<p class="muted">لا توجد أوسمة بعد — تظهر تلقائيًا مع التقدّم.</p>`}
+      </div>
+      <div class="card"><div class="section-title" style="margin-top:0">📈 الأداء حسب المادة</div>
+        ${subs.length ? `<div class="bar-chart">${subs.map(x => `<div class="bar" style="height:${x.v}%"><span class="val">${num(x.v)}%</span><span class="lbl">${esc(x.s)}</span></div>`).join('')}</div><div style="height:26px"></div>`
+          : `<p class="muted">لا توجد نتائج بعد.</p>`}
+      </div>
+    </div>
+    <div class="card" style="margin-top:16px"><div class="section-title" style="margin-top:0">🕘 آخر الأنشطة المقيّمة</div>
+      ${a.length ? `<table class="tbl"><tr><th>النشاط</th><th>المادة</th><th>النوع</th><th>النتيجة</th><th>التاريخ</th></tr>
+        ${a.map(x => `<tr><td>${esc(x.title)}</td><td>${esc(x.subject)}</td><td>${esc(x.kind)}</td>
+          <td><b>${num(x.score)}/${num(x.total)}</b> (${num(x.pct)}%)</td><td class="muted">${num(arDate(x.when))}</td></tr>`).join('')}</table>`
+        : `<p class="muted">لا توجد أنشطة بعد.</p>`}</div>`;
+}
+const PF_FIELDS = [
+  ['fullName', 'الاسم الرباعي', 'text'], ['dob', 'تاريخ الميلاد', 'date'],
+  ['gender', 'الجنس', 'select', ['ذكر', 'أنثى']], ['nationality', 'الجنسية', 'text'],
+  ['civilId', 'الرقم المدني', 'text'], ['phone', 'الهاتف', 'tel'],
+  ['email', 'البريد الإلكتروني', 'email'], ['address', 'العنوان / الولاية', 'text'],
+  ['school', 'المدرسة', 'text'], ['guardianName', 'ولي الأمر', 'text'],
+  ['guardianPhone', 'هاتف ولي الأمر', 'tel'], ['emergency', 'هاتف الطوارئ', 'tel'],
+];
+function pfPersonal(host, u, d) {
+  const p = profileOf(u), can = canEditProfile(u);
+  host.innerHTML = `<div class="card">
+    <div class="section-title" style="margin-top:0">🪪 البيانات الشخصية ${can ? '' : '<span class="muted" style="font-size:.78rem;font-weight:400">(للعرض فقط)</span>'}</div>
+    <div class="form-grid">
+      ${PF_FIELDS.map(([k, label, type, opts]) => `<div class="field"><label>${label}</label>
+        ${type === 'select'
+          ? `<select data-pf="${k}" ${can ? '' : 'disabled'}><option value=""></option>${opts.map(o => `<option ${p[k] === o ? 'selected' : ''}>${o}</option>`).join('')}</select>`
+          : `<input data-pf="${k}" type="${type}" value="${esc(p[k] || '')}" ${can ? '' : 'disabled'}>`}</div>`).join('')}
+      <div class="field wide"><label>ملاحظات</label><textarea data-pf="notes" rows="2" ${can ? '' : 'disabled'}>${esc(p.notes || '')}</textarea></div>
+    </div>
+    ${can ? `<button class="btn primary" id="pf-save">💾 حفظ البيانات</button>` : ''}
+  </div>`;
+  const s = $('#pf-save', host);
+  if (s) s.onclick = () => {
+    const patch = {};
+    $$('[data-pf]', host).forEach(el => patch[el.dataset.pf] = el.value.trim());
+    saveProfile(u, patch); toast('تم حفظ البيانات', 'ok');
+  };
+}
+function pfClasses(host, u, d) {
+  const isTeacher = d.role === 'معلم';
+  const list = isTeacher ? classes().filter(c => c.teacher === u)
+    : enrolments().filter(e => e.student === u).map(e => Object.assign({_en: e}, classById(e.classId) || {})).filter(c => c.id);
+  host.innerHTML = list.length ? `<div class="card" style="padding:0;overflow:auto"><table class="tbl">
+      <tr><th>الصف</th><th>المادة</th><th>المستوى</th>${isTeacher ? '<th>الطلبة</th>' : '<th>المعلّم</th><th>الحالة</th><th>الحضور</th><th>النتيجة</th>'}</tr>
+      ${list.map(c => { const at = isTeacher ? null : attendanceRate(c.id, u), r = isTeacher ? null : classResult(c.id, u);
+        return `<tr><td><b>${esc(c.title || c.subject)}</b></td><td>${subjIcon(c.subject)} ${esc(c.subject)}</td><td>${esc(gradeName(c.grade))}</td>
+        ${isTeacher ? `<td>${num(classRoster(c.id).length)}</td>`
+          : `<td>${esc(c.teacherName || '—')}</td>
+             <td>${c._en.status === 'active' ? '<span class="pill teal">مسجّل</span>' : c._en.status === 'pending' ? '<span class="pill gold">بانتظار</span>' : '<span class="pill">مرفوض</span>'}</td>
+             <td>${at ? num(at.rate) + '%' : '—'}</td><td>${r ? num(r.pct) + '%' : '—'}</td>`}</tr>`; }).join('')}</table></div>`
+    : `<div class="empty"><div class="big">🏫</div>لا توجد صفوف.</div>`;
+}
+function pfFinance(host, u) {
+  const f = financeOf(u);
+  host.innerHTML = `
+    <div class="stat-tiles">
+      <div class="stat"><div class="k">إجمالي المستحق</div><div class="v" style="font-size:1.25rem">${OMR(f.billed)}</div></div>
+      <div class="stat g"><div class="k">المسدّد</div><div class="v" style="font-size:1.25rem">${OMR(f.paid)}</div></div>
+      <div class="stat b"><div class="k">الإعفاءات</div><div class="v" style="font-size:1.25rem">${OMR(f.waived)}</div></div>
+      <div class="stat p"><div class="k">الرصيد المتبقّي</div><div class="v" style="font-size:1.25rem;color:${f.balance > 0 ? 'var(--danger)' : 'var(--green)'}">${OMR(f.balance)}</div></div>
+    </div>
+    <div class="card" style="margin-top:16px;padding:0;overflow:auto">
+      ${f.list.length ? `<table class="tbl"><tr><th>الصف</th><th>المبلغ</th><th>الحالة</th><th>الطريقة</th><th>التاريخ</th><th></th></tr>
+        ${f.list.map(x => { const c = classById(x.classId) || {}; return `<tr>
+          <td>${esc(c.title || c.subject || '—')}</td><td>${OMR(x.amount)}</td>
+          <td>${x.status === 'paid' ? '<span class="pill teal">مسدّدة</span>' : x.status === 'waived' ? '<span class="pill">معفاة</span>' : '<span class="pill gold">غير مسدّدة</span>'}</td>
+          <td>${esc(x.method || '—')}</td><td class="muted">${x.paidAt ? num(arDate(x.paidAt)) : num(arDate(x.issued))}</td>
+          <td>${x.status === 'paid' ? `<button class="btn sm" data-rec="${esc(x.id)}">🧾</button>` : ''}</td></tr>`; }).join('')}</table>`
+        : `<div class="empty">لا توجد فواتير.</div>`}</div>`;
+  $$('[data-rec]', host).forEach(b => b.onclick = () => {
+    const x = fees().find(y => y.id === b.dataset.rec), c = classById(x.classId) || {};
+    modal('🧾 إيصال سداد', `<div class="receipt">
+      <div class="row" style="justify-content:space-between"><b>نظام التعلّم العُماني — OLS</b><span class="muted">${esc(x.ref || x.id.slice(0, 8))}</span></div><hr>
+      <p><b>الطالب:</b> ${esc(x.studentName)}</p><p><b>الصف:</b> ${esc(c.title || c.subject || '—')}</p>
+      <p><b>المبلغ:</b> ${OMR(x.amount)}</p><p><b>الطريقة:</b> ${esc(x.method || '—')}</p>
+      <p><b>التاريخ:</b> ${num(arDate(x.paidAt))}</p></div>`, `<button class="btn primary" onclick="window.print()">🖨 طباعة</button>`);
+  });
+}
+function pfResults(host, u) {
+  const a = assessmentsOf(u);
+  host.innerHTML = a.length ? `<div class="card" style="padding:0;overflow:auto"><table class="tbl">
+      <tr><th>النشاط</th><th>المادة</th><th>النوع</th><th>الدرجة</th><th>النسبة</th><th>التاريخ</th></tr>
+      ${a.map(x => `<tr><td>${esc(x.title)}</td><td>${esc(x.subject)}</td><td>${esc(x.kind)}</td>
+        <td><b>${num(x.score)}/${num(x.total)}</b></td>
+        <td><span class="pill ${x.pct >= 80 ? 'teal' : x.pct >= 60 ? 'gold' : ''}" ${x.pct < 60 ? 'style="background:#fdeaea;color:var(--danger)"' : ''}>${num(x.pct)}%</span></td>
+        <td class="muted">${num(arDate(x.when))}</td></tr>`).join('')}</table></div>`
+    : `<div class="empty"><div class="big">📊</div>لا توجد نتائج بعد.</div>`;
+}
+function pfDocs(host, u) {
+  const list = docsOf(u), can = canEditProfile(u) || Auth.isTeacher;
+  host.innerHTML = `
+    ${can ? `<button class="btn primary" id="doc-add" style="margin-bottom:12px">⬆ رفع مستند</button>` : ''}
+    ${list.length ? `<div class="lib-grid">${list.map(d => `<div class="book-card">
+        <div class="book-cover" style="background:linear-gradient(135deg,#0891b2,#2563eb)">📄<span class="ext">${esc(d.ext || '')}</span></div>
+        <div class="bc-body"><div class="bc-title">${esc(d.title)}</div>
+          <div class="bc-meta">${esc(d.kind || 'مستند')} · ${num(arDate(d.uploaded))}</div></div>
+        <div class="bc-actions">
+          <a class="btn sm primary" style="flex:1" href="${fileUrl(d.blobKey, d.title)}" target="_blank" rel="noopener">فتح</a>
+          <a class="btn sm" href="${fileUrl(d.blobKey, d.title, true)}" download>⬇</a>
+          ${canEditProfile(u) ? `<button class="btn sm danger" data-ddel="${esc(d.id)}">🗑</button>` : ''}
+        </div></div>`).join('')}</div>`
+      : `<div class="empty"><div class="big">📎</div>لا توجد مستندات مرفوعة.</div>`}`;
+  $$('[data-ddel]', host).forEach(b => b.onclick = () => armed(b, () => { saveDocuments(documents().filter(x => x.id !== b.dataset.ddel)); pfDocs(host, u); }));
+  const add = $('#doc-add', host);
+  if (add) add.onclick = () => {
+    const b = `<div class="field"><label>عنوان المستند</label><input id="d-title" placeholder="البطاقة الشخصية"></div>
+      <div class="field"><label>النوع</label><select id="d-kind">
+        <option>بطاقة شخصية</option><option>شهادة ميلاد</option><option>جواز سفر</option><option>شهادة دراسية</option>
+        <option>تقرير طبي</option><option>إيصال</option><option>أخرى</option></select></div>
+      <div class="field"><label>الملف</label><input id="d-file" type="file" accept=".pdf,image/*,.doc,.docx"></div>`;
+    const m = modal('رفع مستند', b, `<button class="btn primary" id="d-save">رفع</button>`);
+    $('#d-save', m.el).onclick = async () => {
+      const f = $('#d-file', m.el).files[0]; if (!f) return toast('اختر ملفًا', 'err');
+      if (!checkUploadSize(f, false)) return;
+      const btn = $('#d-save', m.el); btn.disabled = true; btn.textContent = '… يقرأ';
+      const dataUrl = await fileToDataURL(f); const id = uid(), key = 'doc-' + id;
+      try { await uploadBlob(key, dataUrl, p => { btn.textContent = 'جارٍ الرفع… ' + num(p) + '%'; }); }
+      catch (e) { btn.disabled = false; btn.textContent = 'رفع'; return toast('تعذّر الرفع', 'err'); }
+      const all = documents();
+      all.push({id, owner: u, title: $('#d-title', m.el).value.trim() || f.name, kind: $('#d-kind', m.el).value,
+        blobKey: key, ext: (f.name.split('.').pop() || '').toUpperCase(), uploaded: Date.now(), by: Auth.user.u});
+      saveDocuments(all); m.close(); toast('تم رفع المستند', 'ok'); pfDocs(host, u);
+    };
+  };
+}
+function pfCerts(host, u) {
+  const list = certificates().filter(c => c.student === u);
+  host.innerHTML = list.length ? `<div class="cert-grid">${list.map(c => `<div class="cert-mini" data-cert="${esc(c.id)}">
+      <div class="cm-medal">🏅</div>
+      <div><b>${esc(c.subject)}</b><div class="muted" style="font-size:.8rem">${esc(gradeName(c.grade))} · ${esc(c.letter)} (${num(c.percent)}%)</div>
+      <div class="muted" style="font-size:.72rem">${esc(c.serial)} · ${num(arDate(c.issued))}</div></div>
+      <button class="btn sm primary">عرض</button></div>`).join('')}</div>`
+    : `<div class="empty"><div class="big">🏅</div>لا توجد شهادات بعد.</div>`;
+  $$('[data-cert]', host).forEach(el => el.onclick = () => showCertificate(el.dataset.cert));
+}
+
+/* ======================== CERTIFICATION SYSTEM ===========================
+   Print-ready A4 landscape certificates in three designs, issued from the
+   student's weighted class result, carrying a unique serial that anyone can
+   check on the verification page (#/verify).
+   ======================================================================== */
+const CERT_TPLS = {
+  classic: {name: 'كلاسيكي', ink: '#0e3b34', accent: '#0e7c66', gold: '#b8912f'},
+  royal: {name: 'ملكي', ink: '#2a1a48', accent: '#5b3f9e', gold: '#c9a227'},
+  kids: {name: 'للأطفال', ink: '#7a2f5f', accent: '#e0498f', gold: '#f4b53f'},
+};
+const certHonour = pct => pct >= 95 ? 'مع مرتبة الشرف الأولى' : pct >= 90 ? 'مع مرتبة الشرف' : '';
+const certOf = id => certificates().find(c => c.id === id);
+const certBySerial = s => certificates().find(c => String(c.serial).toUpperCase() === String(s).trim().toUpperCase());
+
+function certificateHtml(ct, tplKey) {
+  const t = CERT_TPLS[tplKey] || CERT_TPLS.classic;
+  const honour = certHonour(ct.percent);
+  const kids = tplKey === 'kids';
+  return `<div class="cert-sheet cert-${tplKey}" style="--ci:${t.ink};--ca:${t.accent};--cg:${t.gold}">
+    <div class="cert-frame">
+      <svg class="cert-corner tl" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
+      <svg class="cert-corner tr" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
+      <svg class="cert-corner bl" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
+      <svg class="cert-corner br" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
+      <img class="cert-wm" src="assets/logo.svg" alt="">
+      <header class="cert-top">
+        <img class="cert-logo" src="assets/logo.svg" alt="OLS">
+        <div class="cert-org"><b>نظام التعلّم العُماني</b><span>Omani Learning System · OLS</span></div>
+      </header>
+      <div class="cert-title">${kids ? 'شهادة تميّز' : 'شهادة إتمام'}</div>
+      <div class="cert-rule"><span></span>${kids ? '🌟' : '❖'}<span></span></div>
+      <p class="cert-lead">تشهد إدارة النظام بأن ${kids ? 'الطالب المبدع' : 'الطالب/ة'}</p>
+      <div class="cert-name">${esc(ct.studentName)}</div>
+      <p class="cert-lead">قد أتمّ بنجاح متطلبات مادة</p>
+      <div class="cert-subject">${subjIcon(ct.subject)} ${esc(ct.subject)}</div>
+      <div class="cert-meta">${esc(gradeName(ct.grade))}${ct.className ? ' · ' + esc(ct.className) : ''}</div>
+      ${honour ? `<div class="cert-honour">${honour}</div>` : ''}
+      <div class="cert-scores">
+        <div class="cs"><b>${num(ct.percent)}%</b><span>النتيجة</span></div>
+        <div class="cert-seal">
+          <svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" fill="var(--cg)" opacity=".14"/>
+            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--cg)" stroke-width="2.5"/>
+            <circle cx="60" cy="60" r="37" fill="none" stroke="var(--cg)" stroke-width="1" stroke-dasharray="3 4"/>
+            <text x="60" y="54" text-anchor="middle" font-size="15" font-weight="800" fill="var(--ci)">OLS</text>
+            <text x="60" y="74" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ca)">معتمدة</text></svg>
+          <div class="seal-ribbon"><i></i><i></i></div>
+        </div>
+        <div class="cs"><b>${esc(ct.letter)}</b><span>التقدير</span></div>
+      </div>
+      <footer class="cert-foot">
+        <div class="sig"><div class="sig-line"></div>المعلّم: ${esc(ct.teacherName || '—')}</div>
+        <div class="cert-serialbox">
+          <div class="cert-serial">رقم الشهادة: <b>${esc(ct.serial)}</b></div>
+          <div class="cert-date">${num(arDate(ct.issued))}</div>
+          <div class="cert-verify">للتحقّق: افتح «الشهادات ← تحقّق» وأدخل الرقم</div>
+        </div>
+        <div class="sig"><div class="sig-line"></div>الاعتماد: ${esc(ct.issuedBy || '—')}</div>
+      </footer>
+    </div></div>`;
+}
+function showCertificate(id) {
+  const ct = certOf(id); if (!ct) return;
+  let tpl = Store.lget('cert-tpl', 'classic');
+  const m = modal('🏅 الشهادة', `
+    <div class="chip-row" id="ct-tpls">${Object.keys(CERT_TPLS).map(k => `<button class="tab-chip ${k === tpl ? 'active' : ''}" data-ct="${k}">${CERT_TPLS[k].name}</button>`).join('')}</div>
+    <div class="cert-stage" id="ct-stage"></div>`,
+    `<button class="btn primary" id="ct-print">🖨 طباعة / حفظ PDF</button>
+     <button class="btn" id="ct-png">🖼️ حفظ صورة</button>`, {wide: true});
+  const draw = () => { $('#ct-stage', m.el).innerHTML = certificateHtml(ct, tpl); };
+  draw();
+  $$('[data-ct]', m.el).forEach(b => b.onclick = () => { tpl = b.dataset.ct; Store.lset('cert-tpl', tpl); $$('[data-ct]', m.el).forEach(x => x.classList.toggle('active', x === b)); draw(); });
+  $('#ct-print', m.el).onclick = () => printCertificate(ct, tpl);
+  $('#ct-png', m.el).onclick = () => toast('استخدم «طباعة» ثم اختر حفظ كـ PDF — أدقّ من الصورة.', 'ok');
+}
+function printCertificate(ct, tpl) {
+  const w = window.open('', '_blank');
+  if (!w) return toast('اسمح بالنوافذ المنبثقة للطباعة', 'err');
+  w.document.write(`<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8">
+    <title>شهادة — ${esc(ct.studentName)}</title>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="${location.origin}${location.pathname.replace(/[^/]*$/, '')}styles.css">
+    <style>@page{size:A4 landscape;margin:0}
+      html,body{margin:0;padding:0;font-family:Cairo,sans-serif;background:#fff}
+      .cert-stage{padding:0}
+      .cert-sheet{width:297mm;height:210mm;box-shadow:none;border-radius:0}
+      @media print{.cert-sheet{page-break-after:avoid}}</style></head>
+    <body><div class="cert-stage">${certificateHtml(ct, tpl)}</div>
+    <script>window.onload=()=>setTimeout(()=>window.print(),700)<\/script></body></html>`);
+  w.document.close();
+}
+/* ---- public verification ---- */
+PAGES.verify = function (params) {
+  params = params || [];
+  crumb('التحقّق من الشهادات', 'أدخل رقم الشهادة');
+  const q = params[0] || '';
+  $('#view').innerHTML = `
+    <div class="page-head"><div><h2>🔎 التحقّق من صحّة شهادة</h2><p>أدخل رقم الشهادة الظاهر أسفلها للتأكّد من صدورها من النظام.</p></div>
+      <a class="btn" href="#/classes">◀ الصفوف</a></div>
+    <div class="card" style="max-width:560px">
+      <div class="row"><input id="vf-serial" value="${esc(q)}" placeholder="OLS-XXXXXXXX" style="flex:1;padding:.7em .9em;border:1px solid var(--line);border-radius:12px;font-weight:700">
+        <button class="btn primary" id="vf-go">تحقّق</button></div>
+      <div id="vf-out" style="margin-top:14px"></div>
+    </div>`;
+  const run = () => {
+    const s = $('#vf-serial').value.trim(); if (!s) return;
+    const ct = certBySerial(s);
+    $('#vf-out').innerHTML = ct ? `<div class="verify-ok">
+        <div style="font-size:2.4rem">✅</div><b>شهادة صحيحة وصادرة من النظام</b>
+        <table class="tbl" style="margin-top:10px">
+          <tr><th>الطالب</th><td>${esc(ct.studentName)}</td></tr>
+          <tr><th>المادة</th><td>${esc(ct.subject)} — ${esc(gradeName(ct.grade))}</td></tr>
+          <tr><th>النتيجة</th><td><b>${num(ct.percent)}%</b> · ${esc(ct.letter)}</td></tr>
+          <tr><th>المعلّم</th><td>${esc(ct.teacherName || '—')}</td></tr>
+          <tr><th>تاريخ الإصدار</th><td>${num(arDate(ct.issued))}</td></tr>
+        </table>
+        <button class="btn primary" id="vf-view" style="margin-top:10px">عرض الشهادة</button></div>`
+      : `<div class="verify-no"><div style="font-size:2.4rem">⚠️</div><b>لا توجد شهادة بهذا الرقم</b>
+         <p class="muted">تأكّد من الرقم كما هو مطبوع أسفل الشهادة.</p></div>`;
+    const v = $('#vf-view'); if (v) v.onclick = () => showCertificate(ct.id);
+  };
+  $('#vf-go').onclick = run;
+  $('#vf-serial').onkeydown = e => { if (e.key === 'Enter') run(); };
+  if (q) run();
+};
+
+
 /* ---- Users ---- */
 PAGES.users = function () {
   crumb('المستخدمون', 'الأدوار والصلاحيات');
@@ -2514,6 +2916,7 @@ function renderUsers(users) {
     <td><span class="badge-status st-${u.status}">${u.status === 'active' ? 'نشط' : u.status === 'pending' ? 'بانتظار' : 'مرفوض'}</span></td>
     <td class="muted" style="font-size:.78rem">${num(arDate(u.created))}</td>
     <td><div class="row" style="gap:5px">
+      <button class="btn sm" data-prof="${esc(u.u)}" title="الملف الشخصي">🪪</button>
       ${u.status === 'pending' ? `<button class="btn sm primary" data-approve="${esc(u.u)}">قبول</button><button class="btn sm danger" data-reject="${esc(u.u)}">رفض</button>` : ''}
       ${(u.role === 'معلم' || u.role === 'طالب' || u.role === 'ولي أمر') ? `<button class="btn sm" data-assign="${esc(u.u)}" title="التخصيص">📌</button>` : ''}
       ${u.role !== 'مدير' ? `<button class="btn sm" data-pw="${esc(u.u)}" title="كلمة المرور">🔑</button><button class="btn sm danger" data-del="${esc(u.u)}" title="حذف">🗑</button>` : ''}
@@ -2523,6 +2926,7 @@ function renderUsers(users) {
     <div class="card" style="padding:0;overflow:auto"><table class="tbl">
       <tr><th>المستخدم</th><th>الدور</th><th>التخصيص / النطاق</th><th>الحالة</th><th>الإنشاء</th><th>إجراءات</th></tr>${rows}</table></div>`;
   const act = async (u, action, patch) => { try { const r = await api('/api/users', 'POST', {u, action, patch}); renderUsers(r.users); loadDirectory(); updatePendingBadge(); toast('تم', 'ok'); } catch (e) { toast(e.message, 'err'); } };
+  $$('[data-prof]').forEach(b => b.onclick = () => go('profile/' + b.dataset.prof));
   $$('[data-approve]').forEach(b => b.onclick = () => act(b.dataset.approve, 'approve'));
   $$('[data-reject]').forEach(b => b.onclick = () => act(b.dataset.reject, 'reject'));
   $$('[data-del]').forEach(b => b.onclick = () => armed(b, () => act(b.dataset.del, 'remove')));
@@ -2617,6 +3021,7 @@ PAGES.account = function () {
   };
 };
 PAGES.join = function (params) {
+  params = params || [];
   // invitation link → open register prefilled
   const token = params[0];
   showAuth('register', token);
@@ -2746,7 +3151,8 @@ function renderUserMenu() {
     <span class="um-info"><span class="um-name">${esc(Auth.user.name)}</span><span class="um-role">${roleEmoji(Auth.role)} ${esc(Auth.role)}</span></span>
     <svg class="um-caret" viewBox="0 0 24 24"><path d="M7 10l5 5 5-5z"/></svg></button>
     <div class="um-drop" id="um-drop">
-      <a href="#/account">👤 حسابي</a>
+      <a href="#/profile">🪪 ملفي الشخصي</a>
+      <a href="#/account">👤 إعدادات الحساب</a>
       <a href="#/messages">💬 المحادثات</a>
       ${Auth.isAdmin ? '<a href="#/users">👥 المستخدمون</a>' : ''}
       <hr><button class="danger" id="um-logout">🚪 تسجيل الخروج</button>

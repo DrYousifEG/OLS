@@ -22,7 +22,7 @@ const ROOT = __dirname;
 const PORT = process.env.PORT || 3000;
 const HOST = process.env.HOST || '0.0.0.0';
 /* must match APP_VERSION in app.js — check what's live at /api/version */
-const APP_VERSION = 'v2.2 · 2026-07-27';
+const APP_VERSION = 'v2.3 · 2026-07-27';
 const STARTED = new Date().toISOString();
 
 function pickDataDir() {
@@ -278,7 +278,7 @@ async function handleApi(req, res, urlPath, query) {
     return json(res, 200, {ok: true});
   }
   // GET /api/file — serve a stored blob as a real, typed file (mobile PDF/video/audio)
-  if (urlPath === '/api/file' && method === 'GET') {
+  if (urlPath === '/api/file' && (method === 'GET' || method === 'HEAD')) {
     if (!me) { res.writeHead(401, {'Content-Type': 'text/plain'}); return res.end('Not signed in.'); }
     let dataUrl;
     try { dataUrl = fs.readFileSync(blobFile(query.key), 'utf8'); }

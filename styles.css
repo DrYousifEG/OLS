@@ -287,19 +287,91 @@ body.nav-collapsed #menu-btn{display:flex;align-items:center;justify-content:cen
 .receipt{background:var(--panel-2);border:1px dashed var(--line);border-radius:12px;padding:16px;font-size:.9rem}
 .receipt p{margin:.35em 0}
 
-/* ------------------------------ certificate ----------------------------- */
-.certificate{background:#fff;padding:10px}
-.cert-border{border:3px double var(--teal);border-radius:14px;padding:26px 22px;text-align:center;position:relative;background:linear-gradient(180deg,#fff,#f6faf8)}
-.cert-logo{width:64px;height:64px;margin-bottom:6px}
-.cert-h1{font-size:1.9rem;font-weight:800;color:var(--teal-ink)}
-.cert-sub{color:var(--gold);font-weight:700;margin-bottom:14px}
-.cert-txt{color:var(--ink-2);margin:.5em 0}
-.cert-name{font-size:1.8rem;font-weight:800;color:var(--teal);border-bottom:2px dashed var(--line);display:inline-block;padding:0 24px 6px;margin:6px 0}
-.cert-subject{font-size:1.15rem;font-weight:700;color:var(--teal-ink);margin:10px 0}
-.cert-score{display:flex;gap:26px;justify-content:center;margin:14px 0;font-size:1rem}
-.cert-foot{display:flex;gap:30px;justify-content:space-between;margin-top:26px;font-size:.82rem;color:var(--ink-2)}
-.cert-line{border-top:1.5px solid var(--ink-2);width:130px;margin-bottom:5px}
-.cert-serial{margin-top:16px;font-size:.72rem;color:var(--muted)}
+/* ------------------------------ trace box ------------------------------- */
+.trace-panel{flex-direction:column;align-items:stretch}
+.trace-panel .trace-fields{display:none;flex-wrap:wrap;gap:8px;align-items:center;margin-top:8px}
+.trace-panel.open .trace-fields{display:flex}
+.trace-panel .tr-text{flex:1;min-width:170px;padding:.55em .8em;border:1px solid var(--line);border-radius:10px;font-size:1rem}
+.trace-panel .tr-sizeval{color:var(--teal-ink);min-width:26px;text-align:center}
+
+/* ------------------------------ profile --------------------------------- */
+.profile-head{display:flex;gap:18px;align-items:center;flex-wrap:wrap;background:linear-gradient(135deg,var(--teal-ink),#0e5d4d);
+  color:#fff;border-radius:var(--radius);padding:18px 20px;box-shadow:var(--shadow);margin-bottom:16px}
+.ph-photo{position:relative;width:96px;height:96px;border-radius:22px;overflow:hidden;background:rgba(255,255,255,.16);
+  display:flex;align-items:center;justify-content:center;font-size:2rem;font-weight:800;flex:none;box-shadow:0 6px 18px rgba(0,0,0,.25)}
+.ph-photo img{width:100%;height:100%;object-fit:cover}
+.ph-cam{position:absolute;bottom:4px;inset-inline-end:4px;border:0;background:rgba(0,0,0,.55);color:#fff;border-radius:8px;padding:.15em .4em;font-size:.85rem}
+.ph-info{flex:1;min-width:200px}
+.ph-info h2{margin:0;color:#fff}
+.ph-sub{font-size:.85rem;opacity:.9;margin-bottom:10px}
+.ph-stats{display:flex;gap:10px;flex-wrap:wrap}
+.phs{background:rgba(255,255,255,.13);border-radius:12px;padding:.45em .8em;text-align:center;min-width:82px}
+.phs b{display:block;font-size:1.1rem}
+.phs span{font-size:.7rem;opacity:.85}
+.phs.due b{color:#ffd0d0}
+.form-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:0 14px}
+.form-grid .wide{grid-column:1/-1}
+.badge-row{display:flex;gap:10px;flex-wrap:wrap}
+.ach{background:var(--panel-2);border:1px solid var(--line);border-radius:14px;padding:10px 12px;text-align:center;min-width:104px}
+.ach span{font-size:1.7rem;display:block}
+.ach b{display:block;font-size:.85rem;color:var(--teal-ink);margin-top:2px}
+.ach i{font-size:.68rem;color:var(--muted);font-style:normal}
+.lnk{color:var(--teal);text-decoration:none}
+.lnk:hover{text-decoration:underline}
+.cert-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
+.cert-mini{display:flex;align-items:center;gap:10px;background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px;box-shadow:var(--shadow);cursor:pointer}
+.cert-mini:hover{border-color:var(--gold)}
+.cm-medal{font-size:1.9rem}
+.cert-mini>div{flex:1;min-width:0}
+.verify-ok,.verify-no{text-align:center;padding:10px;border-radius:12px}
+.verify-ok{background:#e7f7ec;border:1px solid #b9e6c7}
+.verify-no{background:#fdeaea;border:1px solid #f3c9c9}
+
+/* --------------------------- certificate sheet -------------------------- */
+.cert-stage{overflow:auto;background:#e7edf1;padding:12px;border-radius:12px}
+.cert-sheet{width:1050px;max-width:100%;aspect-ratio:297/210;background:#fff;position:relative;
+  box-shadow:var(--shadow-lg);border-radius:6px;font-family:Cairo,sans-serif;color:var(--ci)}
+.cert-frame{position:absolute;inset:14px;border:2px solid var(--ca);border-radius:4px;padding:2.2% 4%;
+  display:flex;flex-direction:column;align-items:center;text-align:center;overflow:hidden}
+.cert-frame::before{content:"";position:absolute;inset:7px;border:1px solid var(--cg);border-radius:2px;pointer-events:none}
+.cert-corner{position:absolute;width:52px;height:52px;opacity:.9}
+.cert-corner.tl{top:6px;left:6px}
+.cert-corner.tr{top:6px;right:6px;transform:scaleX(-1)}
+.cert-corner.bl{bottom:6px;left:6px;transform:scaleY(-1)}
+.cert-corner.br{bottom:6px;right:6px;transform:scale(-1)}
+.cert-wm{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:46%;opacity:.045;pointer-events:none}
+.cert-top{display:flex;align-items:center;gap:10px;margin-bottom:.4%}
+.cert-logo{width:52px;height:52px}
+.cert-org{text-align:start;line-height:1.15}
+.cert-org b{display:block;font-size:1rem;color:var(--ci)}
+.cert-org span{font-size:.66rem;color:var(--cg);letter-spacing:.5px}
+.cert-title{font-size:2.5rem;font-weight:800;color:var(--ca);letter-spacing:1px;margin-top:.4%}
+.cert-rule{display:flex;align-items:center;gap:10px;color:var(--cg);margin:.3% 0 1%}
+.cert-rule span{display:block;width:100px;height:1.5px;background:linear-gradient(90deg,transparent,var(--cg))}
+.cert-rule span:last-child{background:linear-gradient(270deg,transparent,var(--cg))}
+.cert-lead{margin:.25em 0;color:#5b6b66;font-size:.92rem}
+.cert-name{font-size:2.35rem;font-weight:800;color:var(--ci);border-bottom:2px dotted var(--cg);padding:0 40px .1em;margin:.1em 0 .2em}
+.cert-subject{font-size:1.35rem;font-weight:700;color:var(--ca)}
+.cert-meta{font-size:.85rem;color:#6b7a75;margin-top:.15em}
+.cert-honour{margin-top:.35em;background:var(--cg);color:#fff;font-weight:700;font-size:.8rem;padding:.2em 1.1em;border-radius:999px}
+.cert-scores{display:flex;align-items:center;justify-content:center;gap:34px;margin-top:auto;padding-top:1%}
+.cs b{display:block;font-size:1.6rem;font-weight:800;color:var(--ca)}
+.cs span{font-size:.72rem;color:#6b7a75}
+.cert-seal{position:relative;width:104px;height:104px}
+.cert-seal svg{width:100%;height:100%}
+.seal-ribbon{position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);display:flex;gap:12px}
+.seal-ribbon i{display:block;width:12px;height:26px;background:var(--cg);opacity:.75;clip-path:polygon(0 0,100% 0,100% 100%,50% 78%,0 100%)}
+.cert-foot{display:flex;justify-content:space-between;align-items:flex-end;width:100%;gap:16px;margin-top:1.2%;font-size:.76rem;color:#5b6b66}
+.sig{text-align:center;min-width:150px}
+.sig-line{border-top:1.4px solid #8a9a95;width:150px;margin-bottom:5px}
+.cert-serialbox{text-align:center}
+.cert-serial{font-size:.74rem}
+.cert-serial b{color:var(--ci);letter-spacing:.5px}
+.cert-date{font-size:.72rem;color:#7c8b86}
+.cert-verify{font-size:.62rem;color:#93a3a0;margin-top:2px}
+.cert-kids .cert-name{font-family:Cairo,sans-serif}
+.cert-kids .cert-frame{border-width:3px;border-style:dashed}
+@media(max-width:560px){.cert-title{font-size:1.5rem}.cert-name{font-size:1.4rem}.cert-scores{gap:16px}}
 
 /* ------------------------------ live class ------------------------------ */
 .live-wrap{display:flex;flex-direction:column;gap:10px}
