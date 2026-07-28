@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v2.5 · 2026-07-28';
+const APP_VERSION = 'v2.6 · 2026-07-28';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -2795,7 +2795,12 @@ function certificateHtml(ct, tplKey) {
           <path d="M24 60c0-20 16-36 36-36 12 0 20 6 20 14s-8 12-14 8" fill="none" stroke="var(--cg)" stroke-width="1.6" opacity=".85"/>
           <circle cx="30" cy="96" r="3.2" fill="var(--cg)"/><circle cx="96" cy="30" r="3.2" fill="var(--cg)"/>
         </svg>`).join('')}
-        <img class="cert-wm" src="assets/logo.svg" alt="">
+        <svg class="cert-wm" viewBox="0 0 200 200" aria-hidden="true">
+          <circle cx="100" cy="100" r="86" fill="none" stroke="var(--ca)" stroke-width="1.2"/>
+          <circle cx="100" cy="100" r="72" fill="none" stroke="var(--cg)" stroke-width=".8" stroke-dasharray="3 5"/>
+          <text x="100" y="118" text-anchor="middle" font-size="54" font-weight="700"
+                font-family="Cormorant Garamond,serif" fill="var(--ca)">OLS</text>
+        </svg>
 
         <header class="cert-head">
           <img class="cert-logo" src="assets/logo.svg" alt="OLS">
@@ -2909,19 +2914,44 @@ function showCertificate(id) {
 function printCertificate(ct, tpl) {
   const w = window.open('', '_blank');
   if (!w) return toast('اسمح بالنوافذ المنبثقة للطباعة', 'err');
+  const cssHref = location.origin + location.pathname.replace(/[^/]*$/, '') + 'styles.css';
   w.document.write(`<!doctype html><html dir="rtl" lang="ar"><head><meta charset="utf-8">
     <title>شهادة — ${esc(ct.studentName)}</title>
-    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
-    <link rel="stylesheet" href="${location.origin}${location.pathname.replace(/[^/]*$/, '')}styles.css">
-    <style>@page{size:A4 landscape;margin:0}
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&family=Amiri:wght@400;700&family=Cormorant+Garamond:wght@400;600;700&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="${esc(cssHref)}">
+    <style>
+      /* print the decorative fills too — browsers drop CSS backgrounds by
+         default, which is what flattened the frame, badge, seal and guilloche */
+      *{-webkit-print-color-adjust:exact !important;print-color-adjust:exact !important}
+      @page{size:A4 landscape;margin:0}
       html,body{margin:0;padding:0;font-family:Cairo,sans-serif;background:#fff}
-      .cert-stage{padding:0}
-      .cert-sheet{width:297mm;height:210mm;box-shadow:none;border-radius:0}
-      @media print{.cert-sheet{page-break-after:avoid}}</style></head>
-    <body><div class="cert-stage">${certificateHtml(ct, tpl)}</div>
-    <script>window.onload=()=>setTimeout(()=>window.print(),700)<\/script></body></html>`);
+      .cert-stage{padding:0;margin:0;background:#fff;display:block;overflow:visible}
+      /* fill the sheet exactly; cqw units inside then scale to the real page */
+      .cert-sheet{width:297mm;height:210mm;max-width:none;aspect-ratio:auto;
+        box-shadow:none;border-radius:0;margin:0}
+      .no-print{display:none}
+      @media print{.cert-sheet{page-break-after:avoid;break-inside:avoid}}
+      @media screen{body{background:#dfe6ea;padding:16px}
+        .cert-sheet{box-shadow:0 18px 50px rgba(0,0,0,.25)}}
+    </style></head>
+    <body>
+      <div class="no-print" style="font-family:Cairo,sans-serif;background:#fff8e1;border:1px solid #f4d99a;
+        border-radius:10px;padding:10px 14px;margin:0 auto 14px;max-width:297mm;font-size:.85rem;color:#5a3d00">
+        🖨️ <b>قبل الطباعة:</b> اختر <b>حجم الورق A4</b> واتجاه <b>أفقي (Landscape)</b>،
+        وأزل علامة <b>«الرؤوس والتذييلات / Headers and footers»</b> حتى لا يُطبع التاريخ والرابط على الشهادة،
+        وفعّل <b>«رسومات الخلفية / Background graphics»</b> إن وُجدت.
+      </div>
+      <div class="cert-stage">${certificateHtml(ct, tpl)}</div>
+    <script>
+      (async () => {
+        try { if (document.fonts && document.fonts.ready) await document.fonts.ready; } catch (e) {}
+        await new Promise(r => setTimeout(r, 450));      // let the QR + logo paint
+        window.print();
+      })();
+    <\/script></body></html>`);
   w.document.close();
 }
+
 /* ---- certificates hub: browse · issue · verify ---- */
 PAGES.certificates = function (params) {
   params = params || [];

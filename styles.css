@@ -331,6 +331,7 @@ body.nav-collapsed #menu-btn{display:flex;align-items:center;justify-content:cen
    A4 LANDSCAPE (297×210mm) credential, bilingual, print-ready.            */
 .cert-stage{overflow:auto;background:#dfe6ea;padding:14px;border-radius:12px;display:flex;justify-content:center}
 .cert-sheet{width:1080px;max-width:100%;aspect-ratio:297/210;position:relative;flex:none;
+  -webkit-print-color-adjust:exact;print-color-adjust:exact;
   background:linear-gradient(#fffdf8,#fffdf8);box-shadow:var(--shadow-lg);border-radius:3px;overflow:hidden;
   font-family:Cairo,sans-serif;color:var(--ci);container-type:inline-size}
 .cert-bgimg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.9}
@@ -346,8 +347,7 @@ body.nav-collapsed #menu-btn{display:flex;align-items:center;justify-content:cen
 .cert-orn.tr{top:4px;right:4px;transform:scaleX(-1)}
 .cert-orn.bl{bottom:4px;left:4px;transform:scaleY(-1)}
 .cert-orn.br{bottom:4px;right:4px;transform:scale(-1)}
-.cert-wm{position:absolute;top:52%;left:50%;transform:translate(-50%,-50%);width:26%;opacity:.028;
-  filter:grayscale(1) contrast(.4);pointer-events:none}
+.cert-wm{position:absolute;top:52%;left:50%;transform:translate(-50%,-50%);width:30%;opacity:.07;pointer-events:none}
 
 .cert-head{display:flex;align-items:center;gap:10px}
 .cert-logo{width:4.2cqw;min-width:36px;max-width:52px}
@@ -397,7 +397,7 @@ body.nav-collapsed #menu-btn{display:flex;align-items:center;justify-content:cen
 .cc-txt{text-align:start;font-size:.76cqw;color:#63736e;line-height:1.5}
 .cc-txt b{color:var(--ci)}
 .cc-verify{font-family:'Cormorant Garamond',serif;font-style:italic;color:#8c9a95}
-.cert-micro{position:absolute;bottom:2px;left:0;right:0;font-size:2.6px;letter-spacing:.4px;color:color-mix(in srgb,var(--ca) 35%,transparent);
+.cert-micro{position:absolute;bottom:2px;left:0;right:0;font-size:2.6px;letter-spacing:.4px;color:color-mix(in srgb,var(--ca) 22%,transparent);
   white-space:nowrap;overflow:hidden;text-align:center;pointer-events:none;user-select:none}
 
 /* template flavours */
