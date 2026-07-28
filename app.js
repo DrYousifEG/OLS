@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v2.4 · 2026-07-27';
+const APP_VERSION = 'v2.5 · 2026-07-28';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -2922,6 +2922,77 @@ function printCertificate(ct, tpl) {
     <script>window.onload=()=>setTimeout(()=>window.print(),700)<\/script></body></html>`);
   w.document.close();
 }
+/* ---- certificates hub: browse · issue · verify ---- */
+PAGES.certificates = function (params) {
+  params = params || [];
+  crumb('الشهادات', 'إصدار وعرض والتحقّق');
+  const staff = Auth.isAdmin || Auth.isTeacher;
+  const all = certificates();
+  const mine = staff ? all : all.filter(c => c.student === (Auth.isParent ? (meDir().child || '') : Auth.user.u));
+  $('#view').innerHTML = `
+    <div class="page-head"><div><h2>🏅 الشهادات</h2>
+      <p>${staff ? 'أصدر شهادات إتمام لطلبتك بعد إدخال التقييمات، أو تحقّق من شهادة برقمها.' : 'شهاداتك الصادرة من النظام — يمكنك عرضها وطباعتها.'}</p></div>
+      <div class="row">
+        ${staff ? `<button class="btn primary" id="cert-issue">➕ إصدار شهادة</button>` : ''}
+        <a class="btn" href="#/verify">🔎 تحقّق من شهادة</a>
+      </div></div>
+    ${mine.length ? `<div class="cert-grid">${mine.map(c => `<div class="cert-mini" data-cert="${esc(c.id)}">
+        <div class="cm-medal">🏅</div>
+        <div><b>${esc(c.subject)}</b>
+          <div class="muted" style="font-size:.8rem">${staff ? esc(c.studentName) + ' · ' : ''}${esc(gradeName(c.grade))} · ${esc(c.letter)} (${num(c.percent)}%)</div>
+          <div class="muted" style="font-size:.72rem">${esc(c.serial)} · ${num(arDate(c.issued))}</div></div>
+        <button class="btn sm primary">عرض</button></div>`).join('')}</div>`
+      : `<div class="empty"><div class="big">🏅</div>
+          ${staff ? `لم تُصدر أي شهادة بعد.
+            <div class="muted" style="margin-top:8px;font-size:.85rem;max-width:520px;margin-inline:auto">
+              الشهادة تُصدر من نتيجة الطالب المرجّحة، لذلك تحتاج أولًا: <b>صف معتمد</b> ← <b>طالب مسجّل فيه</b> ←
+              <b>تقييم واحد على الأقل</b> (من تبويب «الدرجات» داخل الصف). ثم اضغط «إصدار شهادة».
+            </div>
+            <div style="margin-top:12px"><button class="btn primary" id="cert-issue2">➕ إصدار شهادة</button>
+            <a class="btn" href="#/classes">🏫 الذهاب للصفوف</a></div>`
+            : 'لم تُصدر لك شهادات بعد — تظهر هنا فور اعتماد معلّمك لها.'}</div>`}`;
+  $$('[data-cert]').forEach(el => el.onclick = () => showCertificate(el.dataset.cert));
+  [$('#cert-issue'), $('#cert-issue2')].forEach(b => { if (b) b.onclick = issueCertificateModal; });
+};
+/* pick a class → see every student's standing → issue in one click */
+function issueCertificateModal() {
+  const mycls = classes().filter(c => canRunClass(c));
+  if (!mycls.length) return modal('إصدار شهادة', `<div class="empty"><div class="big">🏫</div>لا توجد صفوف لديك بعد.
+    <p class="muted">أنشئ صفًا أولًا من صفحة «الصفوف المباشرة».</p></div>`,
+    `<a class="btn primary" href="#/classes" onclick="this.closest('.modal-back').remove()">الذهاب للصفوف</a>`);
+  const body = `<div class="field"><label>الصف</label><select id="ic-class">${mycls.map(c =>
+      `<option value="${esc(c.id)}">${esc(c.title || c.subject)} — ${esc(gradeName(c.grade))}</option>`).join('')}</select></div>
+    <div id="ic-list"></div>`;
+  const m = modal('🏅 إصدار شهادة', body, '', {wide: true});
+  const paint = () => {
+    const cid = $('#ic-class', m.el).value, c = classById(cid), roster = classRoster(cid);
+    $('#ic-list', m.el).innerHTML = roster.length ? `<table class="tbl">
+        <tr><th>الطالب</th><th>النتيجة المرجّحة</th><th>التقدير</th><th></th></tr>
+        ${roster.map(e => { const r = classResult(cid, e.student);
+          const has = certificates().find(x => x.classId === cid && x.student === e.student);
+          return `<tr><td><b>${esc(e.studentName)}</b></td>
+            <td>${r ? num(r.pct) + '%' : '<span class="muted">لا توجد تقييمات</span>'}</td>
+            <td>${r ? esc(r.letter) : '—'}</td>
+            <td>${has ? `<button class="btn sm" data-icview="${esc(has.id)}">عرض الشهادة</button>`
+              : r && r.pass ? `<button class="btn sm primary" data-icissue="${esc(e.student)}">إصدار</button>`
+              : r ? '<span class="muted" style="font-size:.78rem">لم يجتز</span>'
+              : `<button class="btn sm" data-icgrade="${esc(cid)}">إضافة تقييم</button>`}</td></tr>`; }).join('')}</table>`
+      : `<div class="empty">لا يوجد طلبة مسجّلون في هذا الصف.</div>`;
+    $$('[data-icissue]', m.el).forEach(b => b.onclick = () => {
+      const e = roster.find(x => x.student === b.dataset.icissue), r = classResult(cid, e.student);
+      const cs = certificates();
+      cs.push({id: uid(), serial: 'OLS-' + String(Date.now()).slice(-8), classId: cid, student: e.student,
+        studentName: e.studentName, subject: c.subject, grade: c.grade, className: c.title || '',
+        percent: r.pct, letter: r.letter, teacherName: c.teacherName, issued: Date.now(), issuedBy: Auth.user.name});
+      saveCertificates(cs); toast('تم إصدار الشهادة 🏅', 'ok'); paint(); PAGES.certificates();
+    });
+    $$('[data-icview]', m.el).forEach(b => b.onclick = () => { m.close(); showCertificate(b.dataset.icview); });
+    $$('[data-icgrade]', m.el).forEach(b => b.onclick = () => { m.close(); classDetail(b.dataset.icgrade); });
+  };
+  $('#ic-class', m.el).onchange = paint;
+  paint();
+}
+
 /* ---- public verification ---- */
 PAGES.verify = function (params) {
   params = params || [];
