@@ -327,51 +327,84 @@ body.nav-collapsed #menu-btn{display:flex;align-items:center;justify-content:cen
 .verify-ok{background:#e7f7ec;border:1px solid #b9e6c7}
 .verify-no{background:#fdeaea;border:1px solid #f3c9c9}
 
-/* --------------------------- certificate sheet -------------------------- */
-.cert-stage{overflow:auto;background:#e7edf1;padding:12px;border-radius:12px}
-.cert-sheet{width:1050px;max-width:100%;aspect-ratio:297/210;background:#fff;position:relative;
-  box-shadow:var(--shadow-lg);border-radius:6px;font-family:Cairo,sans-serif;color:var(--ci)}
-.cert-frame{position:absolute;inset:14px;border:2px solid var(--ca);border-radius:4px;padding:2.2% 4%;
-  display:flex;flex-direction:column;align-items:center;text-align:center;overflow:hidden}
-.cert-frame::before{content:"";position:absolute;inset:7px;border:1px solid var(--cg);border-radius:2px;pointer-events:none}
-.cert-corner{position:absolute;width:52px;height:52px;opacity:.9}
-.cert-corner.tl{top:6px;left:6px}
-.cert-corner.tr{top:6px;right:6px;transform:scaleX(-1)}
-.cert-corner.bl{bottom:6px;left:6px;transform:scaleY(-1)}
-.cert-corner.br{bottom:6px;right:6px;transform:scale(-1)}
-.cert-wm{position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);width:46%;opacity:.045;pointer-events:none}
-.cert-top{display:flex;align-items:center;gap:10px;margin-bottom:.4%}
-.cert-logo{width:52px;height:52px}
-.cert-org{text-align:start;line-height:1.15}
-.cert-org b{display:block;font-size:1rem;color:var(--ci)}
-.cert-org span{font-size:.66rem;color:var(--cg);letter-spacing:.5px}
-.cert-title{font-size:2.5rem;font-weight:800;color:var(--ca);letter-spacing:1px;margin-top:.4%}
-.cert-rule{display:flex;align-items:center;gap:10px;color:var(--cg);margin:.3% 0 1%}
-.cert-rule span{display:block;width:100px;height:1.5px;background:linear-gradient(90deg,transparent,var(--cg))}
-.cert-rule span:last-child{background:linear-gradient(270deg,transparent,var(--cg))}
-.cert-lead{margin:.25em 0;color:#5b6b66;font-size:.92rem}
-.cert-name{font-size:2.35rem;font-weight:800;color:var(--ci);border-bottom:2px dotted var(--cg);padding:0 40px .1em;margin:.1em 0 .2em}
-.cert-subject{font-size:1.35rem;font-weight:700;color:var(--ca)}
-.cert-meta{font-size:.85rem;color:#6b7a75;margin-top:.15em}
-.cert-honour{margin-top:.35em;background:var(--cg);color:#fff;font-weight:700;font-size:.8rem;padding:.2em 1.1em;border-radius:999px}
-.cert-scores{display:flex;align-items:center;justify-content:center;gap:34px;margin-top:auto;padding-top:1%}
-.cs b{display:block;font-size:1.6rem;font-weight:800;color:var(--ca)}
-.cs span{font-size:.72rem;color:#6b7a75}
-.cert-seal{position:relative;width:104px;height:104px}
-.cert-seal svg{width:100%;height:100%}
-.seal-ribbon{position:absolute;bottom:-6px;left:50%;transform:translateX(-50%);display:flex;gap:12px}
-.seal-ribbon i{display:block;width:12px;height:26px;background:var(--cg);opacity:.75;clip-path:polygon(0 0,100% 0,100% 100%,50% 78%,0 100%)}
-.cert-foot{display:flex;justify-content:space-between;align-items:flex-end;width:100%;gap:16px;margin-top:1.2%;font-size:.76rem;color:#5b6b66}
-.sig{text-align:center;min-width:150px}
-.sig-line{border-top:1.4px solid #8a9a95;width:150px;margin-bottom:5px}
-.cert-serialbox{text-align:center}
-.cert-serial{font-size:.74rem}
-.cert-serial b{color:var(--ci);letter-spacing:.5px}
-.cert-date{font-size:.72rem;color:#7c8b86}
-.cert-verify{font-size:.62rem;color:#93a3a0;margin-top:2px}
-.cert-kids .cert-name{font-family:Cairo,sans-serif}
-.cert-kids .cert-frame{border-width:3px;border-style:dashed}
-@media(max-width:560px){.cert-title{font-size:1.5rem}.cert-name{font-size:1.4rem}.cert-scores{gap:16px}}
+/* --------------------------- certificate sheet --------------------------
+   A4 LANDSCAPE (297×210mm) credential, bilingual, print-ready.            */
+.cert-stage{overflow:auto;background:#dfe6ea;padding:14px;border-radius:12px;display:flex;justify-content:center}
+.cert-sheet{width:1080px;max-width:100%;aspect-ratio:297/210;position:relative;flex:none;
+  background:linear-gradient(#fffdf8,#fffdf8);box-shadow:var(--shadow-lg);border-radius:3px;overflow:hidden;
+  font-family:Cairo,sans-serif;color:var(--ci);container-type:inline-size}
+.cert-bgimg{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.9}
+.cert-guilloche{position:absolute;inset:0;pointer-events:none;opacity:.5;
+  background:
+    repeating-radial-gradient(circle at 50% 50%,transparent 0 13px,color-mix(in srgb,var(--ca) 7%,transparent) 13px 14px),
+    repeating-linear-gradient(45deg,transparent 0 9px,color-mix(in srgb,var(--cg) 5%,transparent) 9px 10px)}
+.cert-frame{position:absolute;inset:2.4%;border:3px solid var(--ca);border-radius:2px}
+.cert-inner{position:absolute;inset:7px;border:1px solid var(--cg);border-radius:1px;
+  display:flex;flex-direction:column;align-items:center;text-align:center;padding:2.2% 5% 1.4%}
+.cert-orn{position:absolute;width:11cqw;max-width:120px;aspect-ratio:1;opacity:.95}
+.cert-orn.tl{top:4px;left:4px}
+.cert-orn.tr{top:4px;right:4px;transform:scaleX(-1)}
+.cert-orn.bl{bottom:4px;left:4px;transform:scaleY(-1)}
+.cert-orn.br{bottom:4px;right:4px;transform:scale(-1)}
+.cert-wm{position:absolute;top:52%;left:50%;transform:translate(-50%,-50%);width:26%;opacity:.028;
+  filter:grayscale(1) contrast(.4);pointer-events:none}
+
+.cert-head{display:flex;align-items:center;gap:10px}
+.cert-logo{width:4.2cqw;min-width:36px;max-width:52px}
+.cert-org{text-align:start;line-height:1.12}
+.cert-org b{display:block;font-size:1.55cqw;color:var(--ci)}
+.cert-org span{font-size:.9cqw;color:var(--cg);letter-spacing:2.2px;font-family:'Cormorant Garamond',serif;font-weight:600}
+
+.cert-titlewrap{margin-top:.4%}
+.cert-title{font-family:Amiri,Cairo,serif;font-size:4.4cqw;font-weight:700;color:var(--ca);margin:0;line-height:1.1}
+.cert-title-en{font-family:'Cormorant Garamond',serif;font-size:1.5cqw;letter-spacing:7px;color:var(--cg);
+  text-transform:uppercase;margin-top:.1em}
+.cert-rule{display:flex;align-items:center;justify-content:center;gap:9px;color:var(--cg);margin:.5% 0 .8%;font-size:.9cqw}
+.cert-rule i{display:block;width:9cqw;height:1px;background:linear-gradient(90deg,transparent,var(--cg))}
+.cert-rule i:last-child{background:linear-gradient(270deg,transparent,var(--cg))}
+
+.cert-lead{margin:.15em 0;color:#5f6f6a;font-size:1.12cqw}
+.cert-lead .en{font-family:'Cormorant Garamond',serif;font-style:italic;color:#93a19c;font-size:.95cqw;letter-spacing:.4px}
+.cert-name{font-family:Amiri,Cairo,serif;font-size:3.5cqw;font-weight:700;color:var(--ci);line-height:1.2;
+  padding:0 4%;margin:.1em 0 .15em;border-bottom:1.5px solid color-mix(in srgb,var(--cg) 60%,transparent)}
+.cert-subject{font-size:1.9cqw;font-weight:700;color:var(--ca);margin-top:.25em}
+.cert-meta{font-size:1cqw;color:#6f7f7a}
+.cert-meta .en{font-family:'Cormorant Garamond',serif;font-style:italic}
+.cert-honour{margin-top:.45%;background:linear-gradient(135deg,var(--cg),#e8cd7a);color:#4a3708;font-weight:700;
+  font-size:.95cqw;padding:.25em 1.5em;border-radius:999px;box-shadow:0 2px 6px rgba(0,0,0,.12)}
+
+.cert-result{display:flex;align-items:center;justify-content:center;gap:2.4cqw;margin-top:.9%}
+.cr b{display:block;font-family:'Cormorant Garamond',serif;font-size:2.5cqw;font-weight:700;color:var(--ca);line-height:1}
+.cr span{font-size:.78cqw;color:#7c8b86;letter-spacing:.3px}
+.cr-sep{width:1px;height:2.6cqw;background:color-mix(in srgb,var(--cg) 55%,transparent)}
+
+.cert-foot{display:flex;align-items:flex-end;justify-content:space-between;width:100%;gap:2%;margin-top:auto;padding-bottom:.2%}
+.sig{flex:1;max-width:26%}
+.sig-name{font-family:Amiri,Cairo,serif;font-size:1.15cqw;color:var(--ci);margin-bottom:.15em}
+.sig-line{border-top:1.2px solid #8d9c97;margin-bottom:.25em}
+.sig-role{font-size:.78cqw;color:#7c8b86}
+.cert-sealwrap{flex:0 0 auto;display:flex;justify-content:center;align-items:flex-end;padding-bottom:.4%}
+.cert-seal{position:relative;width:9.6cqw;min-width:70px}
+.cert-seal svg{width:100%;display:block;filter:drop-shadow(0 3px 6px rgba(0,0,0,.22))}
+.seal-ribbons{position:absolute;bottom:-16%;left:50%;transform:translateX(-50%);display:flex;gap:14%;z-index:-1}
+.seal-ribbons i{display:block;width:1.7cqw;height:4cqw;background:linear-gradient(180deg,#c9a227,#8a6a1c);
+  clip-path:polygon(0 0,100% 0,100% 100%,50% 70%,0 100%);opacity:.92;box-shadow:0 2px 4px rgba(0,0,0,.18)}
+
+.cert-credential{display:flex;align-items:center;gap:10px;margin-top:.5%;
+  border-top:1px solid color-mix(in srgb,var(--cg) 40%,transparent);padding-top:.5%;width:100%;justify-content:center}
+.cc-qr{width:6.6cqw;min-width:54px;background:#fff;padding:2px;border:1px solid #e3e9ee;border-radius:3px}
+.cc-qr svg{width:100%;height:auto;display:block}
+.cc-txt{text-align:start;font-size:.76cqw;color:#63736e;line-height:1.5}
+.cc-txt b{color:var(--ci)}
+.cc-verify{font-family:'Cormorant Garamond',serif;font-style:italic;color:#8c9a95}
+.cert-micro{position:absolute;bottom:2px;left:0;right:0;font-size:2.6px;letter-spacing:.4px;color:color-mix(in srgb,var(--ca) 35%,transparent);
+  white-space:nowrap;overflow:hidden;text-align:center;pointer-events:none;user-select:none}
+
+/* template flavours */
+.cert-royal .cert-sheet,.cert-royal{background:linear-gradient(#fdfcff,#fbfaff)}
+.cert-kids .cert-frame{border-style:double;border-width:5px}
+.cert-kids .cert-title{font-family:Cairo,sans-serif;font-weight:800}
+@media(max-width:560px){.cert-stage{padding:6px}}
 
 /* ------------------------------ live class ------------------------------ */
 .live-wrap{display:flex;flex-direction:column;gap:10px}

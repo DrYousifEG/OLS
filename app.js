@@ -3,7 +3,7 @@
    Structure: helpers → store/sync → auth → media → RBAC → router → pages → boot
    ========================================================================== */
 'use strict';
-const APP_VERSION = 'v2.3 · 2026-07-27';
+const APP_VERSION = 'v2.4 · 2026-07-27';
 const PREFIX = 'ols-';                                  // synced app keys
 const LOCAL_PREFIX = 'olsx-';                            // per-device, never synced
 const SYNC_SKIP = ['ols-token', 'ols-session'];         // never leave the device
@@ -2768,55 +2768,112 @@ const CERT_TPLS = {
   kids: {name: 'للأطفال', ink: '#7a2f5f', accent: '#e0498f', gold: '#f4b53f'},
 };
 const certHonour = pct => pct >= 95 ? 'مع مرتبة الشرف الأولى' : pct >= 90 ? 'مع مرتبة الشرف' : '';
+/* verification link encoded on the certificate — scanning it opens the check page */
+function certVerifyUrl(ct) {
+  return location.origin + location.pathname.replace(/[^/]*$/, '') + '#/verify/' + ct.serial;
+}
+function certQrSvg(ct) {
+  try { return (window.QR && QR.svg(certVerifyUrl(ct), {quiet: 2, dark: '#123', light: '#fff'})) || ''; }
+  catch (e) { return ''; }
+}
 const certOf = id => certificates().find(c => c.id === id);
 const certBySerial = s => certificates().find(c => String(c.serial).toUpperCase() === String(s).trim().toUpperCase());
 
 function certificateHtml(ct, tplKey) {
   const t = CERT_TPLS[tplKey] || CERT_TPLS.classic;
   const honour = certHonour(ct.percent);
-  const kids = tplKey === 'kids';
+  const bg = Store.get('certBg', '');            // optional artwork behind (e.g. a Canva export)
+  const gradeEn = ct.grade === 0 ? 'Kindergarten' : 'Grade ' + ct.grade;
   return `<div class="cert-sheet cert-${tplKey}" style="--ci:${t.ink};--ca:${t.accent};--cg:${t.gold}">
+    ${bg ? `<img class="cert-bgimg" src="${esc(bg)}" alt="">` : ''}
+    <div class="cert-guilloche"></div>
     <div class="cert-frame">
-      <svg class="cert-corner tl" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
-      <svg class="cert-corner tr" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
-      <svg class="cert-corner bl" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
-      <svg class="cert-corner br" viewBox="0 0 100 100"><path d="M2 40C2 18 18 2 40 2" fill="none" stroke="var(--cg)" stroke-width="3"/><circle cx="12" cy="12" r="4" fill="var(--cg)"/></svg>
-      <img class="cert-wm" src="assets/logo.svg" alt="">
-      <header class="cert-top">
-        <img class="cert-logo" src="assets/logo.svg" alt="OLS">
-        <div class="cert-org"><b>نظام التعلّم العُماني</b><span>Omani Learning System · OLS</span></div>
-      </header>
-      <div class="cert-title">${kids ? 'شهادة تميّز' : 'شهادة إتمام'}</div>
-      <div class="cert-rule"><span></span>${kids ? '🌟' : '❖'}<span></span></div>
-      <p class="cert-lead">تشهد إدارة النظام بأن ${kids ? 'الطالب المبدع' : 'الطالب/ة'}</p>
-      <div class="cert-name">${esc(ct.studentName)}</div>
-      <p class="cert-lead">قد أتمّ بنجاح متطلبات مادة</p>
-      <div class="cert-subject">${subjIcon(ct.subject)} ${esc(ct.subject)}</div>
-      <div class="cert-meta">${esc(gradeName(ct.grade))}${ct.className ? ' · ' + esc(ct.className) : ''}</div>
-      ${honour ? `<div class="cert-honour">${honour}</div>` : ''}
-      <div class="cert-scores">
-        <div class="cs"><b>${num(ct.percent)}%</b><span>النتيجة</span></div>
-        <div class="cert-seal">
-          <svg viewBox="0 0 120 120"><circle cx="60" cy="60" r="52" fill="var(--cg)" opacity=".14"/>
-            <circle cx="60" cy="60" r="44" fill="none" stroke="var(--cg)" stroke-width="2.5"/>
-            <circle cx="60" cy="60" r="37" fill="none" stroke="var(--cg)" stroke-width="1" stroke-dasharray="3 4"/>
-            <text x="60" y="54" text-anchor="middle" font-size="15" font-weight="800" fill="var(--ci)">OLS</text>
-            <text x="60" y="74" text-anchor="middle" font-size="12" font-weight="700" fill="var(--ca)">معتمدة</text></svg>
-          <div class="seal-ribbon"><i></i><i></i></div>
+      <div class="cert-inner">
+        ${['tl', 'tr', 'bl', 'br'].map(k => `<svg class="cert-orn ${k}" viewBox="0 0 120 120" aria-hidden="true">
+          <path d="M4 116V44C4 22 22 4 44 4h72" fill="none" stroke="var(--cg)" stroke-width="2.5"/>
+          <path d="M14 116V48C14 30 30 14 48 14h68" fill="none" stroke="var(--cg)" stroke-width="1" opacity=".7"/>
+          <path d="M24 60c0-20 16-36 36-36 12 0 20 6 20 14s-8 12-14 8" fill="none" stroke="var(--cg)" stroke-width="1.6" opacity=".85"/>
+          <circle cx="30" cy="96" r="3.2" fill="var(--cg)"/><circle cx="96" cy="30" r="3.2" fill="var(--cg)"/>
+        </svg>`).join('')}
+        <img class="cert-wm" src="assets/logo.svg" alt="">
+
+        <header class="cert-head">
+          <img class="cert-logo" src="assets/logo.svg" alt="OLS">
+          <div class="cert-org">
+            <b>نظام التعلّم العُماني</b>
+            <span>OMANI LEARNING SYSTEM</span>
+          </div>
+        </header>
+
+        <div class="cert-titlewrap">
+          <h1 class="cert-title">شهادة إتمام</h1>
+          <div class="cert-title-en">Certificate of Completion</div>
+          <div class="cert-rule"><i></i><span>❖</span><i></i></div>
         </div>
-        <div class="cs"><b>${esc(ct.letter)}</b><span>التقدير</span></div>
+
+        <p class="cert-lead">تشهد إدارة النظام بأنّ <span class="en">· This is to certify that ·</span></p>
+        <div class="cert-name">${esc(ct.studentName)}</div>
+        <p class="cert-lead">قد أتمّ/أتمّت بنجاح متطلبات مادة <span class="en">· has successfully completed the requirements of ·</span></p>
+
+        <div class="cert-subject">${esc(ct.subject)}</div>
+        <div class="cert-meta">${esc(gradeName(ct.grade))}${ct.className ? ' — ' + esc(ct.className) : ''} <span class="en">(${esc(gradeEn)})</span></div>
+        ${honour ? `<div class="cert-honour">${honour}</div>` : ''}
+
+        <div class="cert-result">
+          <div class="cr"><b>${num(ct.percent)}%</b><span>النتيجة · Final Score</span></div>
+          <div class="cr-sep"></div>
+          <div class="cr"><b>${esc(ct.letter)}</b><span>التقدير · Grade</span></div>
+        </div>
+
+        <footer class="cert-foot">
+          <div class="sig">
+            <div class="sig-name">${esc(ct.teacherName || '—')}</div>
+            <div class="sig-line"></div>
+            <div class="sig-role">معلّم المادة · Subject Teacher</div>
+          </div>
+
+          <div class="cert-sealwrap">
+            <div class="cert-seal">
+              <svg viewBox="0 0 140 140" aria-hidden="true">
+                <defs><radialGradient id="sg-${tplKey}" cx=".35" cy=".3">
+                  <stop offset="0" stop-color="#fff3c9"/><stop offset=".55" stop-color="var(--cg)"/><stop offset="1" stop-color="#8a6a1c"/>
+                </radialGradient></defs>
+                <circle cx="70" cy="70" r="46" fill="url(#sg-${tplKey})"/>
+                <circle cx="70" cy="70" r="46" fill="none" stroke="#7a5d17" stroke-width="1.2"/>
+                <circle cx="70" cy="70" r="38" fill="none" stroke="#fff8e1" stroke-width="1" opacity=".75"/>
+                <circle cx="70" cy="70" r="33" fill="none" stroke="#7a5d17" stroke-width=".8" stroke-dasharray="2 3"/>
+                ${Array.from({length: 36}, (_, i) => {
+                  const a = i * 10 * Math.PI / 180, r1 = 46, r2 = 51;
+                  return `<line x1="${70 + Math.cos(a) * r1}" y1="${70 + Math.sin(a) * r1}" x2="${70 + Math.cos(a) * r2}" y2="${70 + Math.sin(a) * r2}" stroke="var(--cg)" stroke-width="2.4" stroke-linecap="round"/>`;
+                }).join('')}
+                <text x="70" y="64" text-anchor="middle" font-size="17" font-weight="800" fill="#4a3708" font-family="Cormorant Garamond,serif">OLS</text>
+                <text x="70" y="80" text-anchor="middle" font-size="8.5" font-weight="700" fill="#4a3708">شهادة معتمدة</text>
+                <text x="70" y="92" text-anchor="middle" font-size="6" fill="#5c4610" letter-spacing="1">VERIFIED</text>
+              </svg>
+              <div class="seal-ribbons"><i></i><i></i></div>
+            </div>
+          </div>
+
+          <div class="sig">
+            <div class="sig-name">${esc(ct.issuedBy || '—')}</div>
+            <div class="sig-line"></div>
+            <div class="sig-role">مدير النظام · Director</div>
+          </div>
+        </footer>
+
+        <div class="cert-credential">
+          <div class="cc-qr">${certQrSvg(ct)}</div>
+          <div class="cc-txt">
+            <div><b>Credential ID:</b> ${esc(ct.serial)}</div>
+            <div><b>تاريخ الإصدار · Issued:</b> ${num(arDate(ct.issued))}</div>
+            <div class="cc-verify">امسح الرمز للتحقّق · Scan to verify authenticity</div>
+          </div>
+        </div>
+        <div class="cert-micro">${'OMANI LEARNING SYSTEM · OLS · AUTHENTIC CREDENTIAL · '.repeat(14)}</div>
       </div>
-      <footer class="cert-foot">
-        <div class="sig"><div class="sig-line"></div>المعلّم: ${esc(ct.teacherName || '—')}</div>
-        <div class="cert-serialbox">
-          <div class="cert-serial">رقم الشهادة: <b>${esc(ct.serial)}</b></div>
-          <div class="cert-date">${num(arDate(ct.issued))}</div>
-          <div class="cert-verify">للتحقّق: افتح «الشهادات ← تحقّق» وأدخل الرقم</div>
-        </div>
-        <div class="sig"><div class="sig-line"></div>الاعتماد: ${esc(ct.issuedBy || '—')}</div>
-      </footer>
     </div></div>`;
 }
+
 function showCertificate(id) {
   const ct = certOf(id); if (!ct) return;
   let tpl = Store.lget('cert-tpl', 'classic');
@@ -2824,12 +2881,30 @@ function showCertificate(id) {
     <div class="chip-row" id="ct-tpls">${Object.keys(CERT_TPLS).map(k => `<button class="tab-chip ${k === tpl ? 'active' : ''}" data-ct="${k}">${CERT_TPLS[k].name}</button>`).join('')}</div>
     <div class="cert-stage" id="ct-stage"></div>`,
     `<button class="btn primary" id="ct-print">🖨 طباعة / حفظ PDF</button>
-     <button class="btn" id="ct-png">🖼️ حفظ صورة</button>`, {wide: true});
+     ${Auth.isAdmin ? `<button class="btn" id="ct-bg">🖼️ خلفية مخصّصة</button>` : ''}`, {wide: true});
   const draw = () => { $('#ct-stage', m.el).innerHTML = certificateHtml(ct, tpl); };
   draw();
   $$('[data-ct]', m.el).forEach(b => b.onclick = () => { tpl = b.dataset.ct; Store.lset('cert-tpl', tpl); $$('[data-ct]', m.el).forEach(x => x.classList.toggle('active', x === b)); draw(); });
   $('#ct-print', m.el).onclick = () => printCertificate(ct, tpl);
-  $('#ct-png', m.el).onclick = () => toast('استخدم «طباعة» ثم اختر حفظ كـ PDF — أدقّ من الصورة.', 'ok');
+  const bgb = $('#ct-bg', m.el);
+  if (bgb) bgb.onclick = () => {
+    const b = `<p class="muted">يمكنك استخدام تصميم خلفية خاص بمؤسستك (مثلًا تصميم من Canva بمقاس A4 أفقي)
+        ويضع النظام بيانات الطالب والختم ورمز التحقّق فوقه.</p>
+      <div class="field"><label>رابط صورة الخلفية</label><input id="cb-url" value="${esc(Store.get('certBg', ''))}" placeholder="https://…/certificate.png"></div>
+      <div class="field"><label>أو ارفع صورة (A4 أفقي)</label><input id="cb-file" type="file" accept="image/*"></div>`;
+    const mm = modal('خلفية الشهادة', b, `<button class="btn primary" id="cb-save">حفظ</button><button class="btn" id="cb-clear">إزالة الخلفية</button>`);
+    $('#cb-save', mm.el).onclick = async () => {
+      const f = $('#cb-file', mm.el).files[0];
+      if (f) {
+        if (!checkUploadSize(f, false)) return;
+        const dataUrl = await fileToDataURL(f), key = 'certbg';
+        try { await uploadBlob(key, dataUrl); } catch (e) { return toast('تعذّر الرفع', 'err'); }
+        Store.set('certBg', fileUrl(key, 'certbg'));
+      } else Store.set('certBg', $('#cb-url', mm.el).value.trim());
+      mm.close(); toast('تم حفظ الخلفية', 'ok'); draw();
+    };
+    $('#cb-clear', mm.el).onclick = () => { Store.set('certBg', ''); mm.close(); toast('أُزيلت الخلفية', 'ok'); draw(); };
+  };
 }
 function printCertificate(ct, tpl) {
   const w = window.open('', '_blank');
